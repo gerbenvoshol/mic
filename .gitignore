@@ -53,5 +53,8 @@ dkms.conf
 
 # MIC library test/example outputs
 example
+advanced_example
 storage.data
 test_mic_*
+pipeline_*
+delayed_file.txt
