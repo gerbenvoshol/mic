@@ -232,6 +232,16 @@ MICAPI int micZipDirectory(const char *srcPath, const char *dstFileName);   // C
 MICAPI unsigned char *micCompressData(unsigned char *data, int dataLength, int *compDataLength);        // Compress data (DEFLATE algorithm)
 MICAPI unsigned char *micDecompressData(unsigned char *compData, int compDataLength, int *dataLength);  // Decompress data (DEFLATE algorithm)
 
+// Advanced Pipeline Functions
+MICAPI bool micStepIsComplete(const char *stepName);                    // Check if a step was completed before
+MICAPI void micMarkStepComplete(const char *stepName);                  // Mark a step as complete
+MICAPI bool micSkipStepIfComplete(const char *stepName);                // Skip step if already completed, returns true if skipped
+MICAPI bool micWaitForFile(const char *fileName, int timeoutMs);        // Wait for file to exist, with timeout in milliseconds
+MICAPI bool micWaitForFiles(const char **fileNames, int count, int timeoutMs);  // Wait for multiple files
+MICAPI bool micCheckDependencies(const char **fileNames, int count);    // Check if all dependency files exist
+MICAPI void micClearStepState(const char *stepName);                    // Clear completion state for a step
+MICAPI void micClearAllStepStates(void);                                // Clear all step completion states
+
 #ifdef __cplusplus
 }
 #endif
@@ -265,6 +275,11 @@ MICAPI unsigned char *micDecompressData(unsigned char *compData, int compDataLen
 
 #include <sys/stat.h>
 #include <sys/types.h>
+
+// Optional: Include zlib if available for compression functions
+#if !defined(MIC_NO_ZLIB)
+    #include <zlib.h>
+#endif
 
 #if defined(_WIN32)
     #include <direct.h>             // Required for: _getch(), _chdir()
@@ -310,6 +325,15 @@ MICAPI unsigned char *micDecompressData(unsigned char *compData, int compDataLen
 //----------------------------------------------------------------------------------
 // Types and Structures Definition (internal)
 //----------------------------------------------------------------------------------
+
+// Pipeline step state entry
+typedef struct micStepState {
+    char name[256];
+    bool completed;
+    long timestamp;
+    struct micStepState *next;
+} micStepState;
+
 typedef struct micData {
     int logTypeLevel;
     micTraceLogCallback traceLog;
@@ -318,6 +342,11 @@ typedef struct micData {
         unsigned long long int base;
         double previous;
     } Time;
+    
+    struct {
+        micStepState *firstStep;
+        const char *stateFileName;
+    } Pipeline;
 } micData;
 
 //----------------------------------------------------------------------------------
@@ -2006,21 +2035,298 @@ int micZipDirectory(const char *srcPath, const char *dstFileName)
 // Compress data (DEFLATE algorithm)
 unsigned char *micCompressData(unsigned char *data, int dataLength, int *compDataLength)
 {
-    // DEFLATE compression requires external library (zlib, miniz, etc.)
-    // or a full DEFLATE implementation
-    micTraceLog(MIC_LOG_WARNING, "micCompressData() not implemented - requires DEFLATE library");
-    *compDataLength = 0;
-    return NULL;
+    #if !defined(MIC_NO_ZLIB)
+        if (data == NULL || dataLength <= 0 || compDataLength == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micCompressData() invalid parameters");
+            *compDataLength = 0;
+            return NULL;
+        }
+        
+        // Allocate buffer for compressed data (worst case: input size + 0.1% + 12 bytes)
+        uLongf destLen = compressBound(dataLength);
+        unsigned char *compData = (unsigned char *)MIC_MALLOC(destLen);
+        
+        if (compData == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micCompressData() failed to allocate memory");
+            *compDataLength = 0;
+            return NULL;
+        }
+        
+        // Compress using zlib (level 6 = default compression)
+        int result = compress2(compData, &destLen, data, dataLength, 6);
+        
+        if (result != Z_OK)
+        {
+            MIC_FREE(compData);
+            micTraceLog(MIC_LOG_ERROR, "micCompressData() compression failed with error %d", result);
+            *compDataLength = 0;
+            return NULL;
+        }
+        
+        *compDataLength = (int)destLen;
+        micTraceLog(MIC_LOG_INFO, "Compressed %d bytes to %d bytes (%.1f%% reduction)", 
+                    dataLength, *compDataLength, 100.0 * (1.0 - (double)*compDataLength / dataLength));
+        
+        return compData;
+    #else
+        micTraceLog(MIC_LOG_WARNING, "micCompressData() not available - MIC_NO_ZLIB defined");
+        *compDataLength = 0;
+        return NULL;
+    #endif
 }
 
 // Decompress data (DEFLATE algorithm)
 unsigned char *micDecompressData(unsigned char *compData, int compDataLength, int *dataLength)
 {
-    // DEFLATE decompression requires external library (zlib, miniz, etc.)
-    // or a full DEFLATE implementation
-    micTraceLog(MIC_LOG_WARNING, "micDecompressData() not implemented - requires DEFLATE library");
-    *dataLength = 0;
-    return NULL;
+    #if !defined(MIC_NO_ZLIB)
+        if (compData == NULL || compDataLength <= 0 || dataLength == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micDecompressData() invalid parameters");
+            *dataLength = 0;
+            return NULL;
+        }
+        
+        // Try with initial buffer size estimate (compressed size * 4)
+        uLongf destLen = compDataLength * 4;
+        unsigned char *data = (unsigned char *)MIC_MALLOC(destLen);
+        
+        if (data == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micDecompressData() failed to allocate memory");
+            *dataLength = 0;
+            return NULL;
+        }
+        
+        // Try decompression
+        int result = uncompress(data, &destLen, compData, compDataLength);
+        
+        // If buffer was too small, try with larger buffer
+        if (result == Z_BUF_ERROR)
+        {
+            MIC_FREE(data);
+            destLen = compDataLength * 10;  // Try 10x size
+            data = (unsigned char *)MIC_MALLOC(destLen);
+            
+            if (data == NULL)
+            {
+                micTraceLog(MIC_LOG_ERROR, "micDecompressData() failed to allocate larger buffer");
+                *dataLength = 0;
+                return NULL;
+            }
+            
+            result = uncompress(data, &destLen, compData, compDataLength);
+        }
+        
+        if (result != Z_OK)
+        {
+            MIC_FREE(data);
+            micTraceLog(MIC_LOG_ERROR, "micDecompressData() decompression failed with error %d", result);
+            *dataLength = 0;
+            return NULL;
+        }
+        
+        *dataLength = (int)destLen;
+        micTraceLog(MIC_LOG_INFO, "Decompressed %d bytes to %d bytes", compDataLength, *dataLength);
+        
+        return data;
+    #else
+        micTraceLog(MIC_LOG_WARNING, "micDecompressData() not available - MIC_NO_ZLIB defined");
+        *dataLength = 0;
+        return NULL;
+    #endif
+}
+
+// Advanced Pipeline Functions
+//----------------------------------------------------------------------------------
+
+// Internal helper to find or create a step state entry
+static micStepState *micFindOrCreateStepState(const char *stepName)
+{
+    if (stepName == NULL) return NULL;
+    
+    // Search for existing step
+    micStepState *current = MIC.Pipeline.firstStep;
+    while (current != NULL)
+    {
+        if (strcmp(current->name, stepName) == 0)
+        {
+            return current;
+        }
+        current = current->next;
+    }
+    
+    // Create new step state
+    micStepState *newStep = (micStepState *)MIC_MALLOC(sizeof(micStepState));
+    if (newStep == NULL) return NULL;
+    
+    strncpy(newStep->name, stepName, 255);
+    newStep->name[255] = '\0';
+    newStep->completed = false;
+    newStep->timestamp = 0;
+    newStep->next = MIC.Pipeline.firstStep;
+    MIC.Pipeline.firstStep = newStep;
+    
+    return newStep;
+}
+
+// Check if a step was completed before
+bool micStepIsComplete(const char *stepName)
+{
+    micStepState *step = micFindOrCreateStepState(stepName);
+    return (step != NULL && step->completed);
+}
+
+// Mark a step as complete
+void micMarkStepComplete(const char *stepName)
+{
+    micStepState *step = micFindOrCreateStepState(stepName);
+    if (step != NULL)
+    {
+        step->completed = true;
+        step->timestamp = micGetTimeStamp();
+        micTraceLog(MIC_LOG_INFO, "Step '%s' marked as complete", stepName);
+    }
+}
+
+// Skip step if already completed, returns true if skipped
+bool micSkipStepIfComplete(const char *stepName)
+{
+    if (micStepIsComplete(stepName))
+    {
+        micTraceLog(MIC_LOG_INFO, "Skipping step '%s' - already completed", stepName);
+        return true;
+    }
+    return false;
+}
+
+// Clear completion state for a step
+void micClearStepState(const char *stepName)
+{
+    micStepState *step = micFindOrCreateStepState(stepName);
+    if (step != NULL)
+    {
+        step->completed = false;
+        step->timestamp = 0;
+        micTraceLog(MIC_LOG_INFO, "Step '%s' state cleared", stepName);
+    }
+}
+
+// Clear all step completion states
+void micClearAllStepStates(void)
+{
+    micStepState *current = MIC.Pipeline.firstStep;
+    while (current != NULL)
+    {
+        micStepState *next = current->next;
+        MIC_FREE(current);
+        current = next;
+    }
+    MIC.Pipeline.firstStep = NULL;
+    micTraceLog(MIC_LOG_INFO, "All step states cleared");
+}
+
+// Wait for file to exist, with timeout in milliseconds
+bool micWaitForFile(const char *fileName, int timeoutMs)
+{
+    if (fileName == NULL) return false;
+    
+    micTraceLog(MIC_LOG_INFO, "Waiting for file '%s' (timeout: %d ms)", fileName, timeoutMs);
+    
+    long startTime = micGetTimeStamp();
+    int pollInterval = 100;  // Poll every 100ms
+    
+    while (true)
+    {
+        // Check if file exists
+        if (micIsFileAvailable(fileName))
+        {
+            micTraceLog(MIC_LOG_INFO, "File '%s' found", fileName);
+            return true;
+        }
+        
+        // Check timeout
+        long currentTime = micGetTimeStamp();
+        long elapsed = (currentTime - startTime) * 1000;  // Convert to ms
+        
+        if (elapsed >= timeoutMs)
+        {
+            micTraceLog(MIC_LOG_WARNING, "Timeout waiting for file '%s'", fileName);
+            return false;
+        }
+        
+        // Wait before next poll
+        micWaitTime(pollInterval);
+    }
+}
+
+// Wait for multiple files
+bool micWaitForFiles(const char **fileNames, int count, int timeoutMs)
+{
+    if (fileNames == NULL || count <= 0) return false;
+    
+    micTraceLog(MIC_LOG_INFO, "Waiting for %d files (timeout: %d ms)", count, timeoutMs);
+    
+    long startTime = micGetTimeStamp();
+    int pollInterval = 100;  // Poll every 100ms
+    
+    while (true)
+    {
+        // Check all files
+        bool allExist = true;
+        for (int i = 0; i < count; i++)
+        {
+            if (!micIsFileAvailable(fileNames[i]))
+            {
+                allExist = false;
+                break;
+            }
+        }
+        
+        if (allExist)
+        {
+            micTraceLog(MIC_LOG_INFO, "All %d files found", count);
+            return true;
+        }
+        
+        // Check timeout
+        long currentTime = micGetTimeStamp();
+        long elapsed = (currentTime - startTime) * 1000;  // Convert to ms
+        
+        if (elapsed >= timeoutMs)
+        {
+            micTraceLog(MIC_LOG_WARNING, "Timeout waiting for files");
+            return false;
+        }
+        
+        // Wait before next poll
+        micWaitTime(pollInterval);
+    }
+}
+
+// Check if all dependency files exist
+bool micCheckDependencies(const char **fileNames, int count)
+{
+    if (fileNames == NULL || count <= 0) return false;
+    
+    bool allExist = true;
+    
+    for (int i = 0; i < count; i++)
+    {
+        if (!micIsFileAvailable(fileNames[i]))
+        {
+            micTraceLog(MIC_LOG_ERROR, "Dependency missing: %s", fileNames[i]);
+            allExist = false;
+        }
+    }
+    
+    if (allExist)
+    {
+        micTraceLog(MIC_LOG_INFO, "All %d dependencies satisfied", count);
+    }
+    
+    return allExist;
 }
 
 #endif   // MIC_IMPLEMENTATION
