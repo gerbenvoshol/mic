@@ -16,8 +16,8 @@ This library provides a set of platform-independent functions intended to be use
  - Plain C library
  - Portable: Single-file header-only
  - Multi-platform (Linux, Windows, macOS)
- - Optional zlib dependency for compression
- - 85+ utility functions for pipeline automation
+ - Optional dependencies: zlib (compression), pthread (threading)
+ - 116+ utility functions for pipeline automation
 
 ## Functionality Provided
 
@@ -34,6 +34,11 @@ This library provides a set of platform-independent functions intended to be use
    - File polling with timeout
    - Dependency checking
    - Pipeline state management
+ - **HPC features** ✨ NEW:
+   - SLURM job submission and management
+   - Container support (Singularity, Docker)
+   - Asynchronous task execution
+   - Multithreading with synchronization
 
 ## Quick Start
 
@@ -124,12 +129,15 @@ gcc -o myapp myapp.c -lz
 
 - [EXAMPLE.md](EXAMPLE.md) - Basic usage examples
 - [ADVANCED_FEATURES.md](ADVANCED_FEATURES.md) - Compression and pipeline features guide
+- [HPC_FEATURES.md](HPC_FEATURES.md) - HPC: SLURM, containers, async, multithreading ✨ NEW
 - [IMPLEMENTATION.md](IMPLEMENTATION.md) - Implementation details and API reference
 
 ## Examples
 
 - `example.c` - Demonstrates all basic features
 - `advanced_example.c` - Shows compression and advanced pipeline features
+- `real_world_example.c` - Practical ETL pipeline demonstration
+- `hpc_example.c` - HPC features: SLURM, containers, async, threads ✨ NEW
 
 Build and run:
 ```bash
@@ -138,6 +146,9 @@ gcc -o example example.c
 
 gcc -o advanced_example advanced_example.c -lz
 ./advanced_example
+
+gcc -o hpc_example hpc_example.c -lz -lpthread
+./hpc_example
 ```
 
 ## Requirements
@@ -147,21 +158,26 @@ gcc -o advanced_example advanced_example.c -lz
 - Standard C library
 
 ### Optional
-- zlib (for compression functions) - install with:
+- **zlib** (for compression functions):
   - Ubuntu/Debian: `apt-get install zlib1g-dev`
   - macOS: `brew install zlib`
   - Windows: Download from zlib.net
+- **pthread** (for multithreading):
+  - Usually available on Linux/macOS
+  - Link with `-lpthread`
 
-To disable compression features, compile with:
+Disable features with flags:
 ```bash
-gcc -o myapp myapp.c -DMIC_NO_ZLIB
+gcc -o myapp myapp.c -DMIC_NO_ZLIB          # No compression
+gcc -o myapp myapp.c -DMIC_NO_THREADS       # No threading
+gcc -o myapp myapp.c -DMIC_NO_ZLIB -DMIC_NO_THREADS  # Minimal build
 ```
 
 ## Platform Support
 
 - ✅ Linux (tested)
 - ✅ macOS (code maintained)
-- ✅ Windows (code maintained)
+- ⚠️ Windows (code maintained, async incomplete)
 
 ## API Overview
 
@@ -171,6 +187,32 @@ gcc -o myapp myapp.c -DMIC_NO_ZLIB
 - `micStepIsComplete()` - Check step state
 - `micMarkStepComplete()` - Mark step done
 - `micSkipStepIfComplete()` - Conditional execution
+
+### HPC - SLURM (5 functions) ✨ NEW
+- `micSlurmSubmitJob()` - Submit job with sbatch
+- `micSlurmJobStatus()` - Query job status
+- `micSlurmWaitForJob()` - Wait for completion
+- `micSlurmCancelJob()` - Cancel job
+- `micSlurmGetJobOutput()` - Get output file
+
+### HPC - Containers (4 functions) ✨ NEW
+- `micSingularityExec()` / `micSingularityRun()` - Singularity containers
+- `micDockerRun()` - Docker containers
+- `micContainerExec()` - Generic container interface
+
+### HPC - Async Execution (5 functions) ✨ NEW
+- `micAsyncExecute()` - Start async process
+- `micAsyncIsRunning()` - Check status
+- `micAsyncWait()` - Wait for completion
+- `micAsyncCancel()` - Terminate process
+- `micAsyncGetOutput()` - Read output
+
+### HPC - Multithreading (9 functions) ✨ NEW
+- `micThreadCreate()` / `micThreadJoin()` - Thread lifecycle
+- `micThreadDetach()` - Detach thread
+- `micMutexCreate()` / `micMutexDestroy()` - Mutex lifecycle
+- `micMutexLock()` / `micMutexUnlock()` - Synchronization
+- `micGetNumCores()` - CPU core count
 
 ### File Polling
 - `micWaitForFile()` - Poll for single file
@@ -199,7 +241,9 @@ gcc -o myapp myapp.c -DMIC_NO_ZLIB
 ### Others
 - Logging, environment info, timing, random numbers, storage
 
-See [IMPLEMENTATION.md](IMPLEMENTATION.md) for complete API reference.
+**Total Functions: 116** (60 core + 2 compression + 8 pipeline + 23 HPC + 23 others)
+
+See [HPC_FEATURES.md](HPC_FEATURES.md) and [IMPLEMENTATION.md](IMPLEMENTATION.md) for complete API reference.
   
 ## License
 
