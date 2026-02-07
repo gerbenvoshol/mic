@@ -50,3 +50,23 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# MIC library test/example outputs
+example
+advanced_example
+real_world_example
+hpc_example
+storage.data
+test_mic_*
+pipeline_*
+delayed_file.txt
+api_key.txt
+raw_data.csv
+transformed_data.csv
+archive.dat.z
+test_job.sh
+job_output.txt
+async_output.txt
+hpc_input.txt
+hpc_processed.txt
+hpc_result.txt
