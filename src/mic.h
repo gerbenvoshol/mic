@@ -49,6 +49,9 @@
 #ifndef MIC_H
 #define MIC_H
 
+#include <stdarg.h>     // Required for: va_list
+#include <stdbool.h>    // Required for: bool type
+
 #ifndef MICAPI
     #define MICAPI   // We are building or using the library as a static library (or Linux shared library)
 #endif
@@ -252,6 +255,7 @@ MICAPI unsigned char *micDecompressData(unsigned char *compData, int compDataLen
 #include <time.h>                   // Required for: time(), localtime()
 #include <ctype.h>                  // Required for: toupper(), tolower()
 #include <stdbool.h>                // Required for: bool, true, false
+#include <errno.h>                  // Required for: errno, error constants
 
 #if !defined(_WIN32)
     #include <unistd.h>             // Required for: access(), execv()
@@ -632,12 +636,14 @@ const char *micGetTimeStampString(long timestamp)
 // Wait (sleep) a specific amount of time
 int micWaitTime(int milliseconds)
 {
+    int ms = milliseconds;  // Local variable for modifications
+    
 #if defined(SUPPORT_BUSY_WAIT_LOOP)
     double previousTime = micGetTime();
     double currentTime = 0.0;
 
     // Busy wait loop
-    while ((currentTime - previousTime) < ms/1000.0f) currentTime = GetTime();
+    while ((currentTime - previousTime) < ms/1000.0f) currentTime = micGetTime();
 #else
     #if defined(SUPPORT_PARTIALBUSY_WAIT_LOOP)
         double busyWait = ms*0.05;     // NOTE: We are using a busy wait of 5% of the time
@@ -670,6 +676,8 @@ int micWaitTime(int milliseconds)
         while ((currentTime - previousTime) < busyWait/1000.0f) currentTime = micGetTime();
     #endif
 #endif
+    
+    return 0;
 }
 
 // File system: Edition
@@ -818,7 +826,7 @@ int micCheckFileAccess()
 }
 
 // Create an empty directory
-int micCreateDirectory(const char *dirPathName)
+int micMakeDirectory(const char *dirPathName)
 {
     // Mode: Read + Write + eXecute: S_IRWXU (User), S_IRWXG (Group), S_IRWXO (Others)
     int result = mkdir(dirPathName, S_IRWXU | S_IRWXG | S_IRWXO);
@@ -1284,6 +1292,16 @@ char **micGetDirectoryFiles(const char *dirPath, int *count)
     #endif
 }
 
+// Clear directory files paths buffers (free memory)
+void micClearDirectoryFiles(void)
+{
+    // Note: This function is designed to work with a global buffer approach
+    // However, micGetDirectoryFiles currently allocates memory that must be freed by the caller
+    // This function is kept for API compatibility but is essentially a no-op
+    // Users should manually free the result from micGetDirectoryFiles
+    micTraceLog(MIC_LOG_INFO, "micClearDirectoryFiles() called - memory management is caller's responsibility");
+}
+
 
 // String management (no UTF-8 strings, only byte chars)
 // NOTE: Some strings allocate memory internally for returned strings -> REVIEW
@@ -1370,73 +1388,320 @@ const char *micStringSubstring(const char *str, int position, int length)
 // Replace string (WARNING: memory must be freed!)
 char *micStringReplace(char *str, const char *replace, const char *by)
 {
-
+    if (str == NULL || replace == NULL || by == NULL) return NULL;
+    
+    int replaceLen = (int)strlen(replace);
+    int byLen = (int)strlen(by);
+    int strLen = (int)strlen(str);
+    
+    // Count occurrences
+    int count = 0;
+    char *temp = str;
+    
+    while ((temp = strstr(temp, replace)) != NULL)
+    {
+        count++;
+        temp += replaceLen;
+    }
+    
+    if (count == 0) return str;
+    
+    // Allocate new string
+    int newLen = strLen + count * (byLen - replaceLen);
+    char *result = (char *)MIC_MALLOC(newLen + 1);
+    
+    if (result == NULL) return NULL;
+    
+    // Build new string
+    char *src = str;
+    char *dst = result;
+    
+    while (*src != '\0')
+    {
+        char *match = strstr(src, replace);
+        
+        if (match == src)
+        {
+            // Copy replacement
+            memcpy(dst, by, byLen);
+            dst += byLen;
+            src += replaceLen;
+        }
+        else
+        {
+            *dst++ = *src++;
+        }
+    }
+    
+    *dst = '\0';
+    
+    return result;
 }
 
 // Insert string in a position (WARNING: memory must be freed!)
 char *micStringInsert(const char *str, const char *insert, int position)
 {
-
+    if (str == NULL || insert == NULL || position < 0) return NULL;
+    
+    int strLen = (int)strlen(str);
+    int insertLen = (int)strlen(insert);
+    
+    if (position > strLen) position = strLen;
+    
+    char *result = (char *)MIC_MALLOC(strLen + insertLen + 1);
+    
+    if (result == NULL) return NULL;
+    
+    // Copy before position
+    memcpy(result, str, position);
+    
+    // Copy insert
+    memcpy(result + position, insert, insertLen);
+    
+    // Copy after position
+    memcpy(result + position + insertLen, str + position, strLen - position);
+    
+    result[strLen + insertLen] = '\0';
+    
+    return result;
 }
 
 // Join strings with delimiter
 const char *micStringJoin(const char **strList, int count, const char *delimiter)
 {
-
+    static char joinedStr[MIC_STRING_STATIC_MAX_SIZE] = { 0 };
+    
+    if (strList == NULL || count <= 0) return NULL;
+    
+    joinedStr[0] = '\0';
+    int delimLen = (delimiter != NULL) ? (int)strlen(delimiter) : 0;
+    int currentLen = 0;
+    
+    for (int i = 0; i < count; i++)
+    {
+        if (strList[i] != NULL)
+        {
+            int strLen = (int)strlen(strList[i]);
+            
+            if (currentLen + strLen < MIC_STRING_STATIC_MAX_SIZE - 1)
+            {
+                strcat(joinedStr, strList[i]);
+                currentLen += strLen;
+                
+                if (i < count - 1 && delimiter != NULL && currentLen + delimLen < MIC_STRING_STATIC_MAX_SIZE - 1)
+                {
+                    strcat(joinedStr, delimiter);
+                    currentLen += delimLen;
+                }
+            }
+        }
+    }
+    
+    return joinedStr;
 }
 
 // Split string into multiple strings
 const char **micStringSplit(const char *str, char delimiter, int *count)
 {
-
+    if (str == NULL || count == NULL) return NULL;
+    
+    // Count delimiters
+    int delimCount = 0;
+    for (int i = 0; str[i] != '\0'; i++)
+    {
+        if (str[i] == delimiter) delimCount++;
+    }
+    
+    *count = delimCount + 1;
+    
+    // Allocate array for strings
+    const char **result = (const char **)MIC_MALLOC(*count * sizeof(char *));
+    
+    if (result == NULL)
+    {
+        *count = 0;
+        return NULL;
+    }
+    
+    // Split string
+    int index = 0;
+    const char *start = str;
+    
+    for (int i = 0; str[i] != '\0'; i++)
+    {
+        if (str[i] == delimiter)
+        {
+            int len = (int)(&str[i] - start);
+            char *token = (char *)MIC_MALLOC(len + 1);
+            
+            if (token != NULL)
+            {
+                memcpy(token, start, len);
+                token[len] = '\0';
+                result[index++] = token;
+            }
+            
+            start = &str[i + 1];
+        }
+    }
+    
+    // Add last token
+    int len = (int)strlen(start);
+    char *token = (char *)MIC_MALLOC(len + 1);
+    
+    if (token != NULL)
+    {
+        strcpy(token, start);
+        result[index++] = token;
+    }
+    
+    *count = index;
+    
+    return result;
 }
 
 // Append string at specific position and move cursor
 void micStringAppend(char *str, const char *append, int *position)
 {
-
+    if (str == NULL || append == NULL || position == NULL) return;
+    
+    int appendLen = (int)strlen(append);
+    
+    memcpy(str + *position, append, appendLen);
+    *position += appendLen;
+    str[*position] = '\0';
 }
 
 // Find first string occurrence within a string
 int micStringFindIndex(const char *str, const char *find)
 {
-
+    if (str == NULL || find == NULL) return -1;
+    
+    const char *found = strstr(str, find);
+    
+    if (found != NULL)
+    {
+        return (int)(found - str);
+    }
+    
+    return -1;
 }
 
 // Get upper case version of provided string
 const char *micStringToUpper(const char *str)
 {
-
+    static char upperStr[MIC_STRING_STATIC_MAX_SIZE] = { 0 };
+    
+    if (str == NULL) return NULL;
+    
+    int len = (int)strlen(str);
+    if (len >= MIC_STRING_STATIC_MAX_SIZE) len = MIC_STRING_STATIC_MAX_SIZE - 1;
+    
+    for (int i = 0; i < len; i++)
+    {
+        upperStr[i] = (char)toupper(str[i]);
+    }
+    
+    upperStr[len] = '\0';
+    
+    return upperStr;
 }
 
 // Get lower case version of provided string
 const char *micStringToLower(const char *str)
 {
-
+    static char lowerStr[MIC_STRING_STATIC_MAX_SIZE] = { 0 };
+    
+    if (str == NULL) return NULL;
+    
+    int len = (int)strlen(str);
+    if (len >= MIC_STRING_STATIC_MAX_SIZE) len = MIC_STRING_STATIC_MAX_SIZE - 1;
+    
+    for (int i = 0; i < len; i++)
+    {
+        lowerStr[i] = (char)tolower(str[i]);
+    }
+    
+    lowerStr[len] = '\0';
+    
+    return lowerStr;
 }
 
 // Get Pascal case notation version of provided string
 const char *micStringToPascal(const char *str)
 {
-
+    static char pascalStr[MIC_STRING_STATIC_MAX_SIZE] = { 0 };
+    
+    if (str == NULL) return NULL;
+    
+    int len = (int)strlen(str);
+    if (len >= MIC_STRING_STATIC_MAX_SIZE) len = MIC_STRING_STATIC_MAX_SIZE - 1;
+    
+    bool capitalizeNext = true;
+    int index = 0;
+    
+    for (int i = 0; i < len && index < MIC_STRING_STATIC_MAX_SIZE - 1; i++)
+    {
+        if (str[i] == ' ' || str[i] == '_' || str[i] == '-')
+        {
+            capitalizeNext = true;
+        }
+        else
+        {
+            if (capitalizeNext)
+            {
+                pascalStr[index++] = (char)toupper(str[i]);
+                capitalizeNext = false;
+            }
+            else
+            {
+                pascalStr[index++] = (char)tolower(str[i]);
+            }
+        }
+    }
+    
+    pascalStr[index] = '\0';
+    
+    return pascalStr;
 }
 
 // Get integer value from string (negative values not supported)
 int micStringToInteger(const char *str)
 {
-
+    if (str == NULL) return 0;
+    
+    int result = 0;
+    int i = 0;
+    
+    // Skip whitespace
+    while (str[i] == ' ' || str[i] == '\t') i++;
+    
+    // Convert digits
+    while (str[i] >= '0' && str[i] <= '9')
+    {
+        result = result * 10 + (str[i] - '0');
+        i++;
+    }
+    
+    return result;
 }
 
 // Check if a string contains another string
 bool micStringContains(const char *str, const char *contain)
 {
-
+    if (str == NULL || contain == NULL) return false;
+    
+    return (strstr(str, contain) != NULL);
 }
 
 // Check if a string starts with another prefix string
 bool micStringStartsWith(const char *str, const char *start)
 {
-
+    if (str == NULL || start == NULL) return false;
+    
+    int startLen = (int)strlen(start);
+    
+    return (strncmp(str, start, startLen) == 0);
 }
 
 // Misc functions
@@ -1445,85 +1710,289 @@ bool micStringStartsWith(const char *str, const char *start)
 // Save integer value to storage file (to defined position), returns true on success
 bool micSaveStorageValue(unsigned int position, int value)
 {
-
+    const char *storageFile = "storage.data";
+    
+    FILE *file = fopen(storageFile, "rb+");
+    bool newFile = false;
+    
+    if (file == NULL)
+    {
+        file = fopen(storageFile, "wb+");
+        newFile = true;
+    }
+    
+    if (file == NULL) return false;
+    
+    // Seek to position
+    if (fseek(file, position * sizeof(int), SEEK_SET) != 0)
+    {
+        fclose(file);
+        return false;
+    }
+    
+    // Write value
+    size_t written = fwrite(&value, sizeof(int), 1, file);
+    
+    fclose(file);
+    
+    return (written == 1);
 }
 
 // Load integer value from storage file (from defined position)
 int micLoadStorageValue(unsigned int position)
 {
-
+    const char *storageFile = "storage.data";
+    
+    FILE *file = fopen(storageFile, "rb");
+    
+    if (file == NULL) return 0;
+    
+    // Seek to position
+    if (fseek(file, position * sizeof(int), SEEK_SET) != 0)
+    {
+        fclose(file);
+        return 0;
+    }
+    
+    // Read value
+    int value = 0;
+    size_t read = fread(&value, sizeof(int), 1, file);
+    
+    fclose(file);
+    
+    return (read == 1) ? value : 0;
 }
 
 // Get a random value between min and max (both included)
 int micGetRandomValue(int min, int max)
 {
-
+    if (min > max)
+    {
+        int temp = min;
+        min = max;
+        max = temp;
+    }
+    
+    return min + (rand() % (max - min + 1));
 }
 
 // Set the seed for the random number generator
 void micSetRandomSeed(unsigned int seed)
 {
-
+    srand(seed);
 }
 
 // Load file data as byte array (read)
 unsigned char *micLoadFileData(const char *fileName, unsigned int *bytesRead)
 {
-
+    unsigned char *data = NULL;
+    *bytesRead = 0;
+    
+    FILE *file = fopen(fileName, "rb");
+    
+    if (file == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "[%s] Failed to open file", fileName);
+        return NULL;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    int size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    if (size > 0)
+    {
+        data = (unsigned char *)MIC_MALLOC(size);
+        
+        if (data != NULL)
+        {
+            unsigned int count = (unsigned int)fread(data, 1, size, file);
+            *bytesRead = count;
+            
+            if (count != size)
+            {
+                micTraceLog(MIC_LOG_WARNING, "[%s] File partially loaded (%u of %d bytes)", fileName, count, size);
+            }
+            else
+            {
+                micTraceLog(MIC_LOG_INFO, "[%s] File loaded successfully (%u bytes)", fileName, count);
+            }
+        }
+        else
+        {
+            micTraceLog(MIC_LOG_ERROR, "[%s] Failed to allocate memory for file data", fileName);
+        }
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_WARNING, "[%s] File is empty", fileName);
+    }
+    
+    fclose(file);
+    
+    return data;
 }
 
 // Unload file data allocated by LoadFileData()
 void micUnloadFileData(unsigned char *data)
 {
-
+    if (data != NULL) MIC_FREE(data);
 }
 
 // Save data to file from byte array (write), returns true on success
 bool micSaveFileData(const char *fileName, void *data, unsigned int bytesToWrite)
 {
-
+    if (data == NULL || bytesToWrite == 0) return false;
+    
+    FILE *file = fopen(fileName, "wb");
+    
+    if (file == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "[%s] Failed to open file for writing", fileName);
+        return false;
+    }
+    
+    unsigned int written = (unsigned int)fwrite(data, 1, bytesToWrite, file);
+    
+    fclose(file);
+    
+    if (written == bytesToWrite)
+    {
+        micTraceLog(MIC_LOG_INFO, "[%s] File saved successfully (%u bytes)", fileName, written);
+        return true;
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_ERROR, "[%s] Failed to write all data (%u of %u bytes)", fileName, written, bytesToWrite);
+        return false;
+    }
 }
 
 // Load text data from file (read), returns a '\0' terminated string
 char *micLoadFileText(const char *fileName)
 {
-
+    char *text = NULL;
+    
+    FILE *file = fopen(fileName, "rt");
+    
+    if (file == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "[%s] Failed to open text file", fileName);
+        return NULL;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    int size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    if (size > 0)
+    {
+        text = (char *)MIC_MALLOC(size + 1);
+        
+        if (text != NULL)
+        {
+            unsigned int count = (unsigned int)fread(text, 1, size, file);
+            text[count] = '\0';
+            
+            if (count != size)
+            {
+                micTraceLog(MIC_LOG_WARNING, "[%s] Text file partially loaded (%u of %d bytes)", fileName, count, size);
+            }
+            else
+            {
+                micTraceLog(MIC_LOG_INFO, "[%s] Text file loaded successfully (%u bytes)", fileName, count);
+            }
+        }
+        else
+        {
+            micTraceLog(MIC_LOG_ERROR, "[%s] Failed to allocate memory for text file", fileName);
+        }
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_WARNING, "[%s] Text file is empty", fileName);
+        text = (char *)MIC_MALLOC(1);
+        if (text != NULL) text[0] = '\0';
+    }
+    
+    fclose(file);
+    
+    return text;
 }
 
 // Unload file text data allocated by LoadFileText()
 void micUnloadFileText(char *text)
 {
-
+    if (text != NULL) MIC_FREE(text);
 }
 
 // Save text data to file (write), string must be '\0' terminated, returns true on success
 bool micSaveFileText(const char *fileName, char *text)
 {
-
+    if (text == NULL) return false;
+    
+    FILE *file = fopen(fileName, "wt");
+    
+    if (file == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "[%s] Failed to open file for writing text", fileName);
+        return false;
+    }
+    
+    int len = (int)strlen(text);
+    int written = (int)fwrite(text, 1, len, file);
+    
+    fclose(file);
+    
+    if (written == len)
+    {
+        micTraceLog(MIC_LOG_INFO, "[%s] Text file saved successfully (%d bytes)", fileName, written);
+        return true;
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_ERROR, "[%s] Failed to write all text (%d of %d bytes)", fileName, written, len);
+        return false;
+    }
 }
 
 // Compress file into a .zip
 int micZipFile(const char *srcFileName, const char *dstFileName)
 {
-
+    // ZIP file creation requires external library (like miniz or zlib)
+    // or a full ZIP format implementation
+    micTraceLog(MIC_LOG_WARNING, "micZipFile() not implemented - requires ZIP library");
+    return -1;
 }
 
 // Compress directory into a .zip
 int micZipDirectory(const char *srcPath, const char *dstFileName)
 {
-
+    // ZIP directory creation requires external library and recursive directory traversal
+    micTraceLog(MIC_LOG_WARNING, "micZipDirectory() not implemented - requires ZIP library");
+    return -1;
 }
 
 // Compress data (DEFLATE algorithm)
 unsigned char *micCompressData(unsigned char *data, int dataLength, int *compDataLength)
 {
-
+    // DEFLATE compression requires external library (zlib, miniz, etc.)
+    // or a full DEFLATE implementation
+    micTraceLog(MIC_LOG_WARNING, "micCompressData() not implemented - requires DEFLATE library");
+    *compDataLength = 0;
+    return NULL;
 }
 
 // Decompress data (DEFLATE algorithm)
 unsigned char *micDecompressData(unsigned char *compData, int compDataLength, int *dataLength)
 {
-
+    // DEFLATE decompression requires external library (zlib, miniz, etc.)
+    // or a full DEFLATE implementation
+    micTraceLog(MIC_LOG_WARNING, "micDecompressData() not implemented - requires DEFLATE library");
+    *dataLength = 0;
+    return NULL;
 }
 
 #endif   // MIC_IMPLEMENTATION
