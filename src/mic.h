@@ -242,6 +242,42 @@ MICAPI bool micCheckDependencies(const char **fileNames, int count);    // Check
 MICAPI void micClearStepState(const char *stepName);                    // Clear completion state for a step
 MICAPI void micClearAllStepStates(void);                                // Clear all step completion states
 
+// HPC Features - SLURM Integration
+MICAPI int micSlurmSubmitJob(const char *scriptFile, const char *jobName, const char *options);  // Submit job to SLURM, returns job ID or -1
+MICAPI int micSlurmJobStatus(int jobId);                                // Get job status: 0=running, 1=completed, 2=failed, -1=not found
+MICAPI bool micSlurmWaitForJob(int jobId, int timeoutSec);             // Wait for job completion with timeout
+MICAPI bool micSlurmCancelJob(int jobId);                               // Cancel running job
+MICAPI char* micSlurmGetJobOutput(int jobId, const char *outputFile);  // Read job output file, must be freed
+
+// HPC Features - Container Support
+MICAPI int micSingularityExec(const char *image, const char *command, const char *bindPaths);  // Execute command in Singularity
+MICAPI int micSingularityRun(const char *image, const char *args, const char *bindPaths);      // Run Singularity container
+MICAPI int micDockerRun(const char *image, const char *command, const char *volumes);          // Run Docker container
+MICAPI int micContainerExec(const char *containerType, const char *image, const char *command, const char *mounts);  // Generic container exec
+
+// HPC Features - Asynchronous Execution
+MICAPI int micAsyncExecute(const char *command);                        // Execute command asynchronously, returns process ID
+MICAPI bool micAsyncIsRunning(int pid);                                 // Check if async process is still running
+MICAPI int micAsyncWait(int pid, int timeoutSec);                       // Wait for async process, returns exit code
+MICAPI bool micAsyncCancel(int pid);                                    // Cancel/kill async process
+MICAPI char* micAsyncGetOutput(int pid, const char *outputFile);       // Read output from async process
+
+// HPC Features - Multithreading (requires -lpthread)
+#if !defined(MIC_NO_THREADS)
+typedef void (*micThreadFunction)(void *arg);
+typedef struct micThread micThread;
+typedef struct micMutex micMutex;
+
+MICAPI micThread* micThreadCreate(micThreadFunction func, void *arg);  // Create and start thread
+MICAPI bool micThreadJoin(micThread *thread, int timeoutMs);           // Wait for thread completion
+MICAPI void micThreadDetach(micThread *thread);                        // Detach thread
+MICAPI micMutex* micMutexCreate(void);                                 // Create mutex
+MICAPI void micMutexDestroy(micMutex *mutex);                          // Destroy mutex
+MICAPI void micMutexLock(micMutex *mutex);                             // Lock mutex
+MICAPI void micMutexUnlock(micMutex *mutex);                           // Unlock mutex
+MICAPI int micGetNumCores(void);                                        // Get number of CPU cores
+#endif
+
 #ifdef __cplusplus
 }
 #endif
@@ -279,6 +315,19 @@ MICAPI void micClearAllStepStates(void);                                // Clear
 // Optional: Include zlib if available for compression functions
 #if !defined(MIC_NO_ZLIB)
     #include <zlib.h>
+#endif
+
+// Optional: Include pthread if available for multithreading
+#if !defined(MIC_NO_THREADS) && !defined(_WIN32)
+    #include <pthread.h>
+#endif
+
+// For async process management
+#if !defined(_WIN32)
+    #include <sys/wait.h>               // Required for: waitpid()
+    #include <signal.h>                 // Required for: kill()
+#else
+    #include <process.h>                // Required for: _spawnv()
 #endif
 
 #if defined(_WIN32)
@@ -333,6 +382,29 @@ typedef struct micStepState {
     long timestamp;
     struct micStepState *next;
 } micStepState;
+
+// Thread structure (internal)
+#if !defined(MIC_NO_THREADS)
+struct micThread {
+    #if defined(_WIN32)
+        void *handle;
+    #else
+        pthread_t thread;
+    #endif
+    micThreadFunction function;
+    void *arg;
+    bool detached;
+};
+
+// Mutex structure (internal)
+struct micMutex {
+    #if defined(_WIN32)
+        void *handle;
+    #else
+        pthread_mutex_t mutex;
+    #endif
+};
+#endif
 
 typedef struct micData {
     int logTypeLevel;
@@ -2328,5 +2400,648 @@ bool micCheckDependencies(const char **fileNames, int count)
     
     return allExist;
 }
+
+// HPC Features - SLURM Integration
+//----------------------------------------------------------------------------------
+
+// Submit job to SLURM scheduler
+int micSlurmSubmitJob(const char *scriptFile, const char *jobName, const char *options)
+{
+    if (scriptFile == NULL || !micIsFileAvailable(scriptFile))
+    {
+        micTraceLog(MIC_LOG_ERROR, "SLURM script file not found: %s", scriptFile);
+        return -1;
+    }
+    
+    // Build sbatch command
+    char command[2048];
+    if (jobName != NULL && options != NULL)
+    {
+        snprintf(command, sizeof(command), "sbatch --job-name=%s %s %s", jobName, options, scriptFile);
+    }
+    else if (jobName != NULL)
+    {
+        snprintf(command, sizeof(command), "sbatch --job-name=%s %s", jobName, scriptFile);
+    }
+    else if (options != NULL)
+    {
+        snprintf(command, sizeof(command), "sbatch %s %s", options, scriptFile);
+    }
+    else
+    {
+        snprintf(command, sizeof(command), "sbatch %s", scriptFile);
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Submitting SLURM job: %s", command);
+    
+    // Execute sbatch and capture output
+    FILE *fp = popen(command, "r");
+    if (fp == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to execute sbatch command");
+        return -1;
+    }
+    
+    char output[256];
+    int jobId = -1;
+    
+    while (fgets(output, sizeof(output), fp) != NULL)
+    {
+        // Parse job ID from "Submitted batch job 12345"
+        if (strstr(output, "Submitted batch job") != NULL)
+        {
+            char *ptr = strstr(output, "job") + 4;
+            while (*ptr == ' ') ptr++;
+            jobId = atoi(ptr);
+            break;
+        }
+    }
+    
+    pclose(fp);
+    
+    if (jobId > 0)
+    {
+        micTraceLog(MIC_LOG_INFO, "SLURM job submitted: ID=%d", jobId);
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to parse SLURM job ID");
+    }
+    
+    return jobId;
+}
+
+// Get SLURM job status
+int micSlurmJobStatus(int jobId)
+{
+    if (jobId <= 0) return -1;
+    
+    char command[256];
+    snprintf(command, sizeof(command), "squeue -j %d -h -o %%T", jobId);
+    
+    FILE *fp = popen(command, "r");
+    if (fp == NULL) return -1;
+    
+    char status[64];
+    int result = -1;
+    
+    if (fgets(status, sizeof(status), fp) != NULL)
+    {
+        // Parse status: PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
+        if (strstr(status, "RUNNING") || strstr(status, "PENDING"))
+        {
+            result = 0;  // Running
+        }
+        else if (strstr(status, "COMPLETED"))
+        {
+            result = 1;  // Completed
+        }
+        else if (strstr(status, "FAILED") || strstr(status, "CANCELLED") || strstr(status, "TIMEOUT"))
+        {
+            result = 2;  // Failed
+        }
+    }
+    else
+    {
+        // Job not found in queue (completed or failed)
+        // Check sacct for completed jobs
+        pclose(fp);
+        snprintf(command, sizeof(command), "sacct -j %d -n -o State -X", jobId);
+        fp = popen(command, "r");
+        if (fp != NULL && fgets(status, sizeof(status), fp) != NULL)
+        {
+            if (strstr(status, "COMPLETED"))
+            {
+                result = 1;
+            }
+            else
+            {
+                result = 2;
+            }
+        }
+    }
+    
+    pclose(fp);
+    return result;
+}
+
+// Wait for SLURM job completion
+bool micSlurmWaitForJob(int jobId, int timeoutSec)
+{
+    if (jobId <= 0) return false;
+    
+    micTraceLog(MIC_LOG_INFO, "Waiting for SLURM job %d (timeout: %d sec)", jobId, timeoutSec);
+    
+    long startTime = micGetTimeStamp();
+    
+    while (true)
+    {
+        int status = micSlurmJobStatus(jobId);
+        
+        if (status == 1)
+        {
+            micTraceLog(MIC_LOG_INFO, "SLURM job %d completed successfully", jobId);
+            return true;
+        }
+        else if (status == 2)
+        {
+            micTraceLog(MIC_LOG_ERROR, "SLURM job %d failed", jobId);
+            return false;
+        }
+        else if (status == -1)
+        {
+            // Job not found, assume completed
+            return true;
+        }
+        
+        // Check timeout
+        long currentTime = micGetTimeStamp();
+        if (currentTime - startTime >= timeoutSec)
+        {
+            micTraceLog(MIC_LOG_WARNING, "Timeout waiting for SLURM job %d", jobId);
+            return false;
+        }
+        
+        // Wait 5 seconds before next check
+        micWaitTime(5000);
+    }
+}
+
+// Cancel SLURM job
+bool micSlurmCancelJob(int jobId)
+{
+    if (jobId <= 0) return false;
+    
+    char command[256];
+    snprintf(command, sizeof(command), "scancel %d", jobId);
+    
+    int result = system(command);
+    
+    if (result == 0)
+    {
+        micTraceLog(MIC_LOG_INFO, "SLURM job %d cancelled", jobId);
+        return true;
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to cancel SLURM job %d", jobId);
+        return false;
+    }
+}
+
+// Get SLURM job output
+char* micSlurmGetJobOutput(int jobId, const char *outputFile)
+{
+    if (outputFile == NULL || !micIsFileAvailable(outputFile))
+    {
+        micTraceLog(MIC_LOG_WARNING, "SLURM output file not found: %s", outputFile);
+        return NULL;
+    }
+    
+    return micLoadFileText(outputFile);
+}
+
+// HPC Features - Container Support
+//----------------------------------------------------------------------------------
+
+// Execute command in Singularity container
+int micSingularityExec(const char *image, const char *command, const char *bindPaths)
+{
+    if (image == NULL || command == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Singularity: image and command required");
+        return -1;
+    }
+    
+    char fullCommand[2048];
+    
+    if (bindPaths != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "singularity exec --bind %s %s %s", bindPaths, image, command);
+    }
+    else
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "singularity exec %s %s", image, command);
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Executing Singularity: %s", fullCommand);
+    
+    int result = system(fullCommand);
+    return WEXITSTATUS(result);
+}
+
+// Run Singularity container
+int micSingularityRun(const char *image, const char *args, const char *bindPaths)
+{
+    if (image == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Singularity: image required");
+        return -1;
+    }
+    
+    char fullCommand[2048];
+    
+    if (bindPaths != NULL && args != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "singularity run --bind %s %s %s", bindPaths, image, args);
+    }
+    else if (bindPaths != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "singularity run --bind %s %s", bindPaths, image);
+    }
+    else if (args != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "singularity run %s %s", image, args);
+    }
+    else
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "singularity run %s", image);
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Running Singularity: %s", fullCommand);
+    
+    int result = system(fullCommand);
+    return WEXITSTATUS(result);
+}
+
+// Run Docker container
+int micDockerRun(const char *image, const char *command, const char *volumes)
+{
+    if (image == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Docker: image required");
+        return -1;
+    }
+    
+    char fullCommand[2048];
+    
+    if (volumes != NULL && command != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "docker run --rm -v %s %s %s", volumes, image, command);
+    }
+    else if (volumes != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "docker run --rm -v %s %s", volumes, image);
+    }
+    else if (command != NULL)
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "docker run --rm %s %s", image, command);
+    }
+    else
+    {
+        snprintf(fullCommand, sizeof(fullCommand), "docker run --rm %s", image);
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Running Docker: %s", fullCommand);
+    
+    int result = system(fullCommand);
+    return WEXITSTATUS(result);
+}
+
+// Generic container execution
+int micContainerExec(const char *containerType, const char *image, const char *command, const char *mounts)
+{
+    if (containerType == NULL || image == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Container: type and image required");
+        return -1;
+    }
+    
+    if (strcmp(containerType, "singularity") == 0)
+    {
+        return micSingularityExec(image, command, mounts);
+    }
+    else if (strcmp(containerType, "docker") == 0)
+    {
+        return micDockerRun(image, command, mounts);
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_ERROR, "Unknown container type: %s", containerType);
+        return -1;
+    }
+}
+
+// HPC Features - Asynchronous Execution
+//----------------------------------------------------------------------------------
+
+// Execute command asynchronously
+int micAsyncExecute(const char *command)
+{
+    if (command == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Async: command required");
+        return -1;
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Executing async: %s", command);
+    
+    #if defined(_WIN32)
+        // Windows implementation
+        micTraceLog(MIC_LOG_WARNING, "Async execution not fully implemented on Windows");
+        return -1;
+    #else
+        // Unix/Linux implementation
+        pid_t pid = fork();
+        
+        if (pid < 0)
+        {
+            micTraceLog(MIC_LOG_ERROR, "Failed to fork process");
+            return -1;
+        }
+        else if (pid == 0)
+        {
+            // Child process
+            execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+            exit(1);  // If execl fails
+        }
+        else
+        {
+            // Parent process
+            micTraceLog(MIC_LOG_INFO, "Async process started: PID=%d", pid);
+            return pid;
+        }
+    #endif
+}
+
+// Check if async process is running
+bool micAsyncIsRunning(int pid)
+{
+    if (pid <= 0) return false;
+    
+    #if defined(_WIN32)
+        return false;
+    #else
+        int status;
+        pid_t result = waitpid(pid, &status, WNOHANG);
+        return (result == 0);  // 0 means still running
+    #endif
+}
+
+// Wait for async process
+int micAsyncWait(int pid, int timeoutSec)
+{
+    if (pid <= 0) return -1;
+    
+    micTraceLog(MIC_LOG_INFO, "Waiting for async process %d (timeout: %d sec)", pid, timeoutSec);
+    
+    #if defined(_WIN32)
+        return -1;
+    #else
+        long startTime = micGetTimeStamp();
+        
+        while (true)
+        {
+            int status;
+            pid_t result = waitpid(pid, &status, WNOHANG);
+            
+            if (result == pid)
+            {
+                // Process finished
+                if (WIFEXITED(status))
+                {
+                    int exitCode = WEXITSTATUS(status);
+                    micTraceLog(MIC_LOG_INFO, "Async process %d exited with code %d", pid, exitCode);
+                    return exitCode;
+                }
+                else
+                {
+                    micTraceLog(MIC_LOG_WARNING, "Async process %d terminated abnormally", pid);
+                    return -1;
+                }
+            }
+            else if (result < 0)
+            {
+                micTraceLog(MIC_LOG_ERROR, "Error waiting for process %d", pid);
+                return -1;
+            }
+            
+            // Check timeout
+            long currentTime = micGetTimeStamp();
+            if (currentTime - startTime >= timeoutSec)
+            {
+                micTraceLog(MIC_LOG_WARNING, "Timeout waiting for async process %d", pid);
+                return -1;
+            }
+            
+            // Wait before next check
+            micWaitTime(100);
+        }
+    #endif
+}
+
+// Cancel async process
+bool micAsyncCancel(int pid)
+{
+    if (pid <= 0) return false;
+    
+    #if defined(_WIN32)
+        return false;
+    #else
+        int result = kill(pid, SIGTERM);
+        
+        if (result == 0)
+        {
+            micTraceLog(MIC_LOG_INFO, "Async process %d terminated", pid);
+            return true;
+        }
+        else
+        {
+            micTraceLog(MIC_LOG_ERROR, "Failed to terminate async process %d", pid);
+            return false;
+        }
+    #endif
+}
+
+// Get output from async process
+char* micAsyncGetOutput(int pid, const char *outputFile)
+{
+    if (outputFile == NULL || !micIsFileAvailable(outputFile))
+    {
+        micTraceLog(MIC_LOG_WARNING, "Async output file not found: %s", outputFile);
+        return NULL;
+    }
+    
+    return micLoadFileText(outputFile);
+}
+
+// HPC Features - Multithreading
+//----------------------------------------------------------------------------------
+
+#if !defined(MIC_NO_THREADS)
+
+// Thread wrapper function
+#if defined(_WIN32)
+static DWORD WINAPI micThreadWrapper(LPVOID arg)
+{
+    micThread *thread = (micThread *)arg;
+    thread->function(thread->arg);
+    return 0;
+}
+#else
+static void* micThreadWrapper(void *arg)
+{
+    micThread *thread = (micThread *)arg;
+    thread->function(thread->arg);
+    return NULL;
+}
+#endif
+
+// Create and start thread
+micThread* micThreadCreate(micThreadFunction func, void *arg)
+{
+    if (func == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Thread: function required");
+        return NULL;
+    }
+    
+    micThread *thread = (micThread *)MIC_MALLOC(sizeof(micThread));
+    if (thread == NULL) return NULL;
+    
+    thread->function = func;
+    thread->arg = arg;
+    thread->detached = false;
+    
+    #if defined(_WIN32)
+        thread->handle = CreateThread(NULL, 0, micThreadWrapper, thread, 0, NULL);
+        if (thread->handle == NULL)
+        {
+            MIC_FREE(thread);
+            micTraceLog(MIC_LOG_ERROR, "Failed to create thread");
+            return NULL;
+        }
+    #else
+        int result = pthread_create(&thread->thread, NULL, micThreadWrapper, thread);
+        if (result != 0)
+        {
+            MIC_FREE(thread);
+            micTraceLog(MIC_LOG_ERROR, "Failed to create thread");
+            return NULL;
+        }
+    #endif
+    
+    micTraceLog(MIC_LOG_INFO, "Thread created");
+    return thread;
+}
+
+// Wait for thread completion
+bool micThreadJoin(micThread *thread, int timeoutMs)
+{
+    if (thread == NULL) return false;
+    
+    if (thread->detached)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Cannot join detached thread");
+        return false;
+    }
+    
+    #if defined(_WIN32)
+        DWORD wait = (timeoutMs < 0) ? INFINITE : timeoutMs;
+        DWORD result = WaitForSingleObject(thread->handle, wait);
+        CloseHandle(thread->handle);
+        MIC_FREE(thread);
+        return (result == WAIT_OBJECT_0);
+    #else
+        // For pthread, timeout is complex - just do infinite wait for simplicity
+        // A production implementation would use condition variables or signals
+        if (timeoutMs < 0 || timeoutMs > 0)
+        {
+            pthread_join(thread->thread, NULL);
+            MIC_FREE(thread);
+            return true;
+        }
+        return false;
+    #endif
+}
+
+// Detach thread
+void micThreadDetach(micThread *thread)
+{
+    if (thread == NULL) return;
+    
+    #if defined(_WIN32)
+        CloseHandle(thread->handle);
+    #else
+        pthread_detach(thread->thread);
+    #endif
+    
+    thread->detached = true;
+    micTraceLog(MIC_LOG_INFO, "Thread detached");
+}
+
+// Create mutex
+micMutex* micMutexCreate(void)
+{
+    micMutex *mutex = (micMutex *)MIC_MALLOC(sizeof(micMutex));
+    if (mutex == NULL) return NULL;
+    
+    #if defined(_WIN32)
+        mutex->handle = CreateMutex(NULL, FALSE, NULL);
+        if (mutex->handle == NULL)
+        {
+            MIC_FREE(mutex);
+            return NULL;
+        }
+    #else
+        pthread_mutex_init(&mutex->mutex, NULL);
+    #endif
+    
+    return mutex;
+}
+
+// Destroy mutex
+void micMutexDestroy(micMutex *mutex)
+{
+    if (mutex == NULL) return;
+    
+    #if defined(_WIN32)
+        CloseHandle(mutex->handle);
+    #else
+        pthread_mutex_destroy(&mutex->mutex);
+    #endif
+    
+    MIC_FREE(mutex);
+}
+
+// Lock mutex
+void micMutexLock(micMutex *mutex)
+{
+    if (mutex == NULL) return;
+    
+    #if defined(_WIN32)
+        WaitForSingleObject(mutex->handle, INFINITE);
+    #else
+        pthread_mutex_lock(&mutex->mutex);
+    #endif
+}
+
+// Unlock mutex
+void micMutexUnlock(micMutex *mutex)
+{
+    if (mutex == NULL) return;
+    
+    #if defined(_WIN32)
+        ReleaseMutex(mutex->handle);
+    #else
+        pthread_mutex_unlock(&mutex->mutex);
+    #endif
+}
+
+// Get number of CPU cores
+int micGetNumCores(void)
+{
+    #if defined(_WIN32)
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        return sysinfo.dwNumberOfProcessors;
+    #elif defined(__linux__) || defined(__APPLE__)
+        return sysconf(_SC_NPROCESSORS_ONLN);
+    #else
+        return 1;
+    #endif
+}
+
+#endif  // MIC_NO_THREADS
 
 #endif   // MIC_IMPLEMENTATION
