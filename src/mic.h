@@ -256,6 +256,7 @@ MICAPI unsigned char *micDecompressData(unsigned char *compData, int compDataLen
 #include <ctype.h>                  // Required for: toupper(), tolower()
 #include <stdbool.h>                // Required for: bool, true, false
 #include <errno.h>                  // Required for: errno, error constants
+#include <limits.h>                 // Required for: INT_MAX, PATH_MAX
 
 #if !defined(_WIN32)
     #include <unistd.h>             // Required for: access(), execv()
@@ -837,7 +838,7 @@ int micMakeDirectory(const char *dirPathName)
     switch (result)
     {
         case 0: micTraceLog(MIC_LOG_INFO, "[%s] Directory created successfully", dirPathName); break;
-        case EEXIST: micTraceLog(MIC_LOG_WARNING, "[%s] Directory already exist", dirPathName); break;
+        case EEXIST: micTraceLog(MIC_LOG_WARNING, "[%s] Directory already exists", dirPathName); break;
         case EACCES: micTraceLog(MIC_LOG_ERROR, "[%s] Write permission denied by parent directory", dirPathName); break;
         case EMLINK: micTraceLog(MIC_LOG_ERROR, "[%s] Parent directory has too many links (entries)", dirPathName); break;
         case ENOSPC: micTraceLog(MIC_LOG_ERROR, "[%s] File system doesn't have enough space", dirPathName); break;
@@ -1261,12 +1262,20 @@ char **micGetDirectoryFiles(const char *dirPath, int *count)
         }
         
         // Allocate array for file names
+        if (fileCount > 10000) fileCount = 10000;  // Sanity check to prevent overflow
+        
         char **files = (char **)MIC_MALLOC(fileCount * sizeof(char *));
         if (files == NULL)
         {
             closedir(dir);
             *count = 0;
             return NULL;
+        }
+        
+        // Initialize array to NULL
+        for (int i = 0; i < fileCount; i++)
+        {
+            files[i] = NULL;
         }
         
         // Second pass: store file names
@@ -1282,6 +1291,13 @@ char **micGetDirectoryFiles(const char *dirPath, int *count)
                 {
                     strcpy(files[index], entry->d_name);
                     index++;
+                }
+                else
+                {
+                    // Allocation failed, cleanup and return what we have so far
+                    *count = index;
+                    closedir(dir);
+                    return files;
                 }
             }
         }
@@ -1408,6 +1424,10 @@ char *micStringReplace(char *str, const char *replace, const char *by)
     
     // Allocate new string
     int newLen = strLen + count * (byLen - replaceLen);
+    
+    // Check for negative length (could happen if replacing with shorter string)
+    if (newLen < 0) newLen = 0;
+    
     char *result = (char *)MIC_MALLOC(newLen + 1);
     
     if (result == NULL) return NULL;
@@ -1676,10 +1696,18 @@ int micStringToInteger(const char *str)
     // Skip whitespace
     while (str[i] == ' ' || str[i] == '\t') i++;
     
-    // Convert digits
+    // Convert digits (with basic overflow check)
     while (str[i] >= '0' && str[i] <= '9')
     {
-        result = result * 10 + (str[i] - '0');
+        int digit = str[i] - '0';
+        
+        // Check for overflow before multiplication
+        if (result > (INT_MAX - digit) / 10)
+        {
+            return INT_MAX;  // Return max value on overflow
+        }
+        
+        result = result * 10 + digit;
         i++;
     }
     
