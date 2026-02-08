@@ -2278,21 +2278,438 @@ bool micSaveFileText(const char *fileName, char *text)
     }
 }
 
+// Helper structure for ZIP file creation
+typedef struct {
+    char fileName[256];
+    unsigned int crc32;
+    unsigned int compressedSize;
+    unsigned int uncompressedSize;
+    unsigned int headerOffset;
+} micZipFileEntry;
+
+// Helper function to calculate CRC32 (for ZIP file integrity)
+static unsigned int micCalculateCRC32(const unsigned char *data, unsigned int length)
+{
+    unsigned int crc = 0xFFFFFFFF;
+    
+    // CRC32 polynomial table (standard ZIP CRC)
+    static unsigned int crc_table[256];
+    static bool table_initialized = false;
+    
+    if (!table_initialized)
+    {
+        for (unsigned int i = 0; i < 256; i++)
+        {
+            unsigned int c = i;
+            for (int j = 0; j < 8; j++)
+            {
+                c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+            }
+            crc_table[i] = c;
+        }
+        table_initialized = true;
+    }
+    
+    for (unsigned int i = 0; i < length; i++)
+    {
+        crc = crc_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    }
+    
+    return crc ^ 0xFFFFFFFF;
+}
+
+// Helper function to write little-endian integers
+static void micWriteLE16(FILE *fp, unsigned short value)
+{
+    fputc(value & 0xFF, fp);
+    fputc((value >> 8) & 0xFF, fp);
+}
+
+static void micWriteLE32(FILE *fp, unsigned int value)
+{
+    fputc(value & 0xFF, fp);
+    fputc((value >> 8) & 0xFF, fp);
+    fputc((value >> 16) & 0xFF, fp);
+    fputc((value >> 24) & 0xFF, fp);
+}
+
+// Helper function to compress data as raw DEFLATE (for ZIP files)
+static unsigned char *micCompressDataRawDeflate(unsigned char *data, int dataLength, int *compDataLength)
+{
+    #if !defined(MIC_NO_ZLIB)
+        if (data == NULL || dataLength <= 0 || compDataLength == NULL)
+        {
+            return NULL;
+        }
+        
+        // Allocate buffer for compressed data (use compressBound as estimate)
+        unsigned long compBufferSize = compressBound(dataLength);
+        unsigned char *compData = (unsigned char *)MIC_MALLOC(compBufferSize);
+        if (compData == NULL)
+        {
+            return NULL;
+        }
+        
+        // Initialize zlib stream for raw DEFLATE
+        z_stream stream;
+        stream.zalloc = Z_NULL;
+        stream.zfree = Z_NULL;
+        stream.opaque = Z_NULL;
+        stream.avail_in = dataLength;
+        stream.next_in = data;
+        stream.avail_out = compBufferSize;
+        stream.next_out = compData;
+        
+        // Initialize deflate with raw DEFLATE (no zlib wrapper)
+        // windowBits = -15 means raw DEFLATE without zlib header/trailer
+        if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        {
+            MIC_FREE(compData);
+            return NULL;
+        }
+        
+        // Compress
+        int result = deflate(&stream, Z_FINISH);
+        deflateEnd(&stream);
+        
+        if (result != Z_STREAM_END)
+        {
+            MIC_FREE(compData);
+            return NULL;
+        }
+        
+        *compDataLength = (int)stream.total_out;
+        return compData;
+    #else
+        return NULL;
+    #endif
+}
+
 // Compress file into a .zip
 int micZipFile(const char *srcFileName, const char *dstFileName)
 {
-    // ZIP file creation requires external library (like miniz or zlib)
-    // or a full ZIP format implementation
-    micTraceLog(MIC_LOG_WARNING, "micZipFile() not implemented - requires ZIP library");
-    return -1;
+    #if !defined(MIC_NO_ZLIB)
+        if (srcFileName == NULL || dstFileName == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micZipFile() invalid parameters");
+            return -1;
+        }
+        
+        // Load source file
+        unsigned int fileSize = 0;
+        unsigned char *fileData = micLoadFileData(srcFileName, &fileSize);
+        if (fileData == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micZipFile() failed to load source file: %s", srcFileName);
+            return -1;
+        }
+        
+        // Calculate CRC32
+        unsigned int crc32 = micCalculateCRC32(fileData, fileSize);
+        
+        // Compress the data using raw DEFLATE (for ZIP format)
+        int compressedSize = 0;
+        unsigned char *compressedData = micCompressDataRawDeflate(fileData, fileSize, &compressedSize);
+        if (compressedData == NULL)
+        {
+            micUnloadFileData(fileData);
+            micTraceLog(MIC_LOG_ERROR, "micZipFile() failed to compress data");
+            return -1;
+        }
+        
+        // Extract just the filename (no path)
+        const char *fileName = micGetFileName(srcFileName);
+        int fileNameLen = (int)strlen(fileName);
+        
+        // Open destination ZIP file
+        FILE *zipFile = fopen(dstFileName, "wb");
+        if (zipFile == NULL)
+        {
+            micUnloadFileData(fileData);
+            micUnloadFileData(compressedData);
+            micTraceLog(MIC_LOG_ERROR, "micZipFile() failed to create ZIP file: %s", dstFileName);
+            return -1;
+        }
+        
+        // Write local file header
+        unsigned int localHeaderOffset = (unsigned int)ftell(zipFile);
+        fwrite("PK\x03\x04", 1, 4, zipFile);          // Local file header signature
+        micWriteLE16(zipFile, 20);                    // Version needed to extract (2.0)
+        micWriteLE16(zipFile, 0);                     // General purpose bit flag
+        micWriteLE16(zipFile, 8);                     // Compression method (8 = DEFLATE)
+        micWriteLE16(zipFile, 0);                     // File last modification time
+        micWriteLE16(zipFile, 0);                     // File last modification date
+        micWriteLE32(zipFile, crc32);                 // CRC-32
+        micWriteLE32(zipFile, compressedSize);        // Compressed size
+        micWriteLE32(zipFile, fileSize);              // Uncompressed size
+        micWriteLE16(zipFile, fileNameLen);           // File name length
+        micWriteLE16(zipFile, 0);                     // Extra field length
+        fwrite(fileName, 1, fileNameLen, zipFile);    // File name
+        
+        // Write compressed data
+        fwrite(compressedData, 1, compressedSize, zipFile);
+        
+        // Write central directory header
+        unsigned int centralDirOffset = (unsigned int)ftell(zipFile);
+        fwrite("PK\x01\x02", 1, 4, zipFile);          // Central directory file header signature
+        micWriteLE16(zipFile, 20);                    // Version made by
+        micWriteLE16(zipFile, 20);                    // Version needed to extract
+        micWriteLE16(zipFile, 0);                     // General purpose bit flag
+        micWriteLE16(zipFile, 8);                     // Compression method
+        micWriteLE16(zipFile, 0);                     // File last modification time
+        micWriteLE16(zipFile, 0);                     // File last modification date
+        micWriteLE32(zipFile, crc32);                 // CRC-32
+        micWriteLE32(zipFile, compressedSize);        // Compressed size
+        micWriteLE32(zipFile, fileSize);              // Uncompressed size
+        micWriteLE16(zipFile, fileNameLen);           // File name length
+        micWriteLE16(zipFile, 0);                     // Extra field length
+        micWriteLE16(zipFile, 0);                     // File comment length
+        micWriteLE16(zipFile, 0);                     // Disk number start
+        micWriteLE16(zipFile, 0);                     // Internal file attributes
+        micWriteLE32(zipFile, 0);                     // External file attributes
+        micWriteLE32(zipFile, localHeaderOffset);     // Relative offset of local header
+        fwrite(fileName, 1, fileNameLen, zipFile);    // File name
+        
+        // Write end of central directory record
+        unsigned int centralDirSize = (unsigned int)ftell(zipFile) - centralDirOffset;
+        fwrite("PK\x05\x06", 1, 4, zipFile);          // End of central directory signature
+        micWriteLE16(zipFile, 0);                     // Number of this disk
+        micWriteLE16(zipFile, 0);                     // Disk where central directory starts
+        micWriteLE16(zipFile, 1);                     // Number of central directory records on this disk
+        micWriteLE16(zipFile, 1);                     // Total number of central directory records
+        micWriteLE32(zipFile, centralDirSize);        // Size of central directory
+        micWriteLE32(zipFile, centralDirOffset);      // Offset of start of central directory
+        micWriteLE16(zipFile, 0);                     // ZIP file comment length
+        
+        fclose(zipFile);
+        
+        // Cleanup
+        micUnloadFileData(fileData);
+        micUnloadFileData(compressedData);
+        
+        micTraceLog(MIC_LOG_INFO, "Successfully created ZIP file: %s", dstFileName);
+        return 0;
+    #else
+        micTraceLog(MIC_LOG_WARNING, "micZipFile() not available - MIC_NO_ZLIB defined");
+        return -1;
+    #endif
+}
+
+// Helper function to add a file to an open ZIP file stream
+static int micZipAddFileToArchive(FILE *zipFile, const char *filePath, const char *archivePath, 
+                                   micZipFileEntry *entry)
+{
+    #if !defined(MIC_NO_ZLIB)
+        // Load file data
+        unsigned int fileSize = 0;
+        unsigned char *fileData = micLoadFileData(filePath, &fileSize);
+        if (fileData == NULL)
+        {
+            return -1;
+        }
+        
+        // Calculate CRC32
+        unsigned int crc32 = micCalculateCRC32(fileData, fileSize);
+        
+        // Compress the data using raw DEFLATE (for ZIP format)
+        int compressedSize = 0;
+        unsigned char *compressedData = micCompressDataRawDeflate(fileData, fileSize, &compressedSize);
+        if (compressedData == NULL)
+        {
+            micUnloadFileData(fileData);
+            return -1;
+        }
+        
+        int archivePathLen = (int)strlen(archivePath);
+        
+        // Store entry info
+        strncpy(entry->fileName, archivePath, 255);
+        entry->fileName[255] = '\0';
+        entry->crc32 = crc32;
+        entry->compressedSize = compressedSize;
+        entry->uncompressedSize = fileSize;
+        entry->headerOffset = (unsigned int)ftell(zipFile);
+        
+        // Write local file header
+        fwrite("PK\x03\x04", 1, 4, zipFile);
+        micWriteLE16(zipFile, 20);
+        micWriteLE16(zipFile, 0);
+        micWriteLE16(zipFile, 8);
+        micWriteLE16(zipFile, 0);
+        micWriteLE16(zipFile, 0);
+        micWriteLE32(zipFile, crc32);
+        micWriteLE32(zipFile, compressedSize);
+        micWriteLE32(zipFile, fileSize);
+        micWriteLE16(zipFile, archivePathLen);
+        micWriteLE16(zipFile, 0);
+        fwrite(archivePath, 1, archivePathLen, zipFile);
+        
+        // Write compressed data
+        fwrite(compressedData, 1, compressedSize, zipFile);
+        
+        // Cleanup
+        micUnloadFileData(fileData);
+        micUnloadFileData(compressedData);
+        
+        return 0;
+    #else
+        return -1;
+    #endif
+}
+
+// Helper function to recursively add directory contents to ZIP
+static int micZipAddDirectoryRecursive(FILE *zipFile, const char *dirPath, const char *basePath,
+                                        micZipFileEntry *entries, int *entryCount, int maxEntries)
+{
+    #if !defined(MIC_NO_ZLIB)
+        int fileCount = 0;
+        char **files = micGetDirectoryFiles(dirPath, &fileCount);
+        
+        if (files == NULL)
+        {
+            return 0;
+        }
+        
+        for (int i = 0; i < fileCount && *entryCount < maxEntries; i++)
+        {
+            char fullPath[MAX_FILEPATH_LENGTH];
+            char archivePath[MAX_FILEPATH_LENGTH];
+            
+            #if defined(_WIN32)
+                snprintf(fullPath, MAX_FILEPATH_LENGTH, "%s\\%s", dirPath, files[i]);
+            #else
+                snprintf(fullPath, MAX_FILEPATH_LENGTH, "%s/%s", dirPath, files[i]);
+            #endif
+            
+            // Calculate relative path for archive
+            if (basePath != NULL && strlen(basePath) > 0)
+            {
+                #if defined(_WIN32)
+                    snprintf(archivePath, MAX_FILEPATH_LENGTH, "%s\\%s", basePath, files[i]);
+                #else
+                    snprintf(archivePath, MAX_FILEPATH_LENGTH, "%s/%s", basePath, files[i]);
+                #endif
+            }
+            else
+            {
+                strncpy(archivePath, files[i], MAX_FILEPATH_LENGTH - 1);
+                archivePath[MAX_FILEPATH_LENGTH - 1] = '\0';
+            }
+            
+            if (micIsDirectoryAvailable(fullPath))
+            {
+                // Recursively add subdirectory
+                micZipAddDirectoryRecursive(zipFile, fullPath, archivePath, entries, entryCount, maxEntries);
+            }
+            else
+            {
+                // Add file to archive
+                if (micZipAddFileToArchive(zipFile, fullPath, archivePath, &entries[*entryCount]) == 0)
+                {
+                    (*entryCount)++;
+                }
+            }
+        }
+        
+        // Cleanup
+        for (int i = 0; i < fileCount; i++)
+        {
+            MIC_FREE(files[i]);
+        }
+        MIC_FREE(files);
+        
+        return 0;
+    #else
+        return -1;
+    #endif
 }
 
 // Compress directory into a .zip
 int micZipDirectory(const char *srcPath, const char *dstFileName)
 {
-    // ZIP directory creation requires external library and recursive directory traversal
-    micTraceLog(MIC_LOG_WARNING, "micZipDirectory() not implemented - requires ZIP library");
-    return -1;
+    #if !defined(MIC_NO_ZLIB)
+        if (srcPath == NULL || dstFileName == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micZipDirectory() invalid parameters");
+            return -1;
+        }
+        
+        if (!micIsDirectoryAvailable(srcPath))
+        {
+            micTraceLog(MIC_LOG_ERROR, "micZipDirectory() source directory does not exist: %s", srcPath);
+            return -1;
+        }
+        
+        // Open destination ZIP file
+        FILE *zipFile = fopen(dstFileName, "wb");
+        if (zipFile == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "micZipDirectory() failed to create ZIP file: %s", dstFileName);
+            return -1;
+        }
+        
+        // Allocate entry array (max 1000 files)
+        const int maxEntries = 1000;
+        micZipFileEntry *entries = (micZipFileEntry *)MIC_MALLOC(maxEntries * sizeof(micZipFileEntry));
+        if (entries == NULL)
+        {
+            fclose(zipFile);
+            micTraceLog(MIC_LOG_ERROR, "micZipDirectory() failed to allocate memory");
+            return -1;
+        }
+        
+        int entryCount = 0;
+        
+        // Add all files from directory recursively
+        micZipAddDirectoryRecursive(zipFile, srcPath, "", entries, &entryCount, maxEntries);
+        
+        // Write central directory
+        unsigned int centralDirOffset = (unsigned int)ftell(zipFile);
+        
+        for (int i = 0; i < entryCount; i++)
+        {
+            int fileNameLen = (int)strlen(entries[i].fileName);
+            
+            fwrite("PK\x01\x02", 1, 4, zipFile);
+            micWriteLE16(zipFile, 20);
+            micWriteLE16(zipFile, 20);
+            micWriteLE16(zipFile, 0);
+            micWriteLE16(zipFile, 8);
+            micWriteLE16(zipFile, 0);
+            micWriteLE16(zipFile, 0);
+            micWriteLE32(zipFile, entries[i].crc32);
+            micWriteLE32(zipFile, entries[i].compressedSize);
+            micWriteLE32(zipFile, entries[i].uncompressedSize);
+            micWriteLE16(zipFile, fileNameLen);
+            micWriteLE16(zipFile, 0);
+            micWriteLE16(zipFile, 0);
+            micWriteLE16(zipFile, 0);
+            micWriteLE16(zipFile, 0);
+            micWriteLE32(zipFile, 0);
+            micWriteLE32(zipFile, entries[i].headerOffset);
+            fwrite(entries[i].fileName, 1, fileNameLen, zipFile);
+        }
+        
+        // Write end of central directory
+        unsigned int centralDirSize = (unsigned int)ftell(zipFile) - centralDirOffset;
+        fwrite("PK\x05\x06", 1, 4, zipFile);
+        micWriteLE16(zipFile, 0);
+        micWriteLE16(zipFile, 0);
+        micWriteLE16(zipFile, entryCount);
+        micWriteLE16(zipFile, entryCount);
+        micWriteLE32(zipFile, centralDirSize);
+        micWriteLE32(zipFile, centralDirOffset);
+        micWriteLE16(zipFile, 0);
+        
+        fclose(zipFile);
+        MIC_FREE(entries);
+        
+        micTraceLog(MIC_LOG_INFO, "Successfully created ZIP archive with %d files: %s", entryCount, dstFileName);
+        return 0;
+    #else
+        micTraceLog(MIC_LOG_WARNING, "micZipDirectory() not available - MIC_NO_ZLIB defined");
+        return -1;
+    #endif
 }
 
 // Compress data (DEFLATE algorithm)
