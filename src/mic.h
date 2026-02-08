@@ -51,6 +51,7 @@
 
 #include <stdarg.h>     // Required for: va_list
 #include <stdbool.h>    // Required for: bool type
+#include <time.h>       // Required for: clock_t, clock()
 
 #ifndef MICAPI
     #define MICAPI   // We are building or using the library as a static library (or Linux shared library)
@@ -171,6 +172,67 @@ typedef struct {
     char **expandedFiles;
     int expandedCount;
 } micWorkflow;
+
+// Rule/Workflow Structures
+
+// Resource management
+typedef struct {
+    int memoryMB;
+    int cpuCores;
+    int gpuCount;
+    int diskMB;
+} micResources;
+
+// Lambda-like input function
+typedef char **(*micInputFunction)(const char *wildcards, void *userData, int *count);
+
+// Rule structure to define workflow steps
+typedef struct {
+    char name[256];
+    char **inputs;
+    int inputCount;
+    char **outputs;
+    int outputCount;
+    char *shell;            // Shell command template
+    char *message;          // Progress message
+    int threads;            // Thread count for this rule
+    char *container;        // Singularity container path
+    char *log;              // Log file path
+    char *benchmark;        // Benchmark output file
+    bool temporary;         // Mark outputs as temporary (auto-delete)
+    micInputFunction inputFunc;  // Dynamic input function
+    void *inputFuncUserData;     // User data for input function
+    micResources resources;      // Resource requirements
+} micRule;
+
+// Workflow DAG for automatic dependency resolution
+typedef struct {
+    micRule **rules;
+    int ruleCount;
+    int ruleCapacity;
+    char *workDir;
+    micConfig config;
+    micSampleList samples;
+} micWorkflowDAG;
+
+// Benchmark tracking
+typedef struct {
+    char ruleName[256];
+    char sample[256];
+    double wallTime;        // Wall clock time in seconds
+    double cpuTime;         // CPU time
+    double maxRSS;          // Maximum resident set size (KB)
+    long timestamp;         // Unix timestamp when benchmark was recorded
+    double startTime;       // Internal: start wall time
+    clock_t startClock;     // Internal: start CPU time
+} micBenchmark;
+
+// Multi-wildcard expansion
+typedef struct {
+    char name[64];
+    char **values;
+    int count;
+} micWildcardSet;
 
 //----------------------------------------------------------------------------------
 // Module Functions Declaration
@@ -399,6 +461,57 @@ MICAPI char *micContainerPath(const char *containerDir, const char *containerNam
 MICAPI char *micBuildPath(const char *workDir, const char *relativePath);        // Build output path
 MICAPI bool micEnsureOutputDir(const char *filePath);                            // Ensure directory exists for output file
 
+// Rule/Workflow Management Functions
+
+// Rule management
+MICAPI micRule *micRuleCreate(const char *name);                                     // Create a new rule
+MICAPI void micRuleSetInput(micRule *rule, const char *pattern);                     // Add input pattern
+MICAPI void micRuleSetOutput(micRule *rule, const char *pattern);                    // Add output pattern
+MICAPI void micRuleSetShell(micRule *rule, const char *command);                     // Set shell command
+MICAPI void micRuleSetContainer(micRule *rule, const char *imagePath);               // Set container image
+MICAPI void micRuleSetThreads(micRule *rule, int threads);                           // Set thread count
+MICAPI void micRuleSetBenchmark(micRule *rule, const char *path);                    // Set benchmark output
+MICAPI void micRuleSetLog(micRule *rule, const char *path);                          // Set log file path
+MICAPI void micRuleSetMessage(micRule *rule, const char *message);                   // Set progress message
+MICAPI void micRuleSetTemporary(micRule *rule, bool temporary);                      // Mark outputs as temporary
+MICAPI void micRuleSetInputFunction(micRule *rule, micInputFunction func, void *userData);  // Set dynamic input function
+MICAPI int micRuleExecute(micRule *rule, const char **wildcards, int wildcardCount); // Execute rule
+MICAPI void micRuleFree(micRule *rule);                                              // Free rule memory
+
+// Rule inheritance/copying
+MICAPI micRule *micRuleCopy(micRule *source, const char *newName);                   // Copy rule with new name
+MICAPI void micRuleOverrideShell(micRule *rule, const char *newShell);               // Override shell command
+MICAPI void micRuleOverrideInput(micRule *rule, int index, const char *newInput);    // Override input at index
+MICAPI void micRuleOverrideOutput(micRule *rule, int index, const char *newOutput);  // Override output at index
+
+// Workflow DAG
+MICAPI micWorkflowDAG *micWorkflowDAGCreate(void);                                   // Create workflow DAG
+MICAPI void micWorkflowDAGAddRule(micWorkflowDAG *dag, micRule *rule);               // Add rule to DAG
+MICAPI void micWorkflowDAGSetWorkDir(micWorkflowDAG *dag, const char *workDir);      // Set working directory
+MICAPI int micWorkflowDAGExecute(micWorkflowDAG *dag, const char *target);           // Execute workflow
+MICAPI void micWorkflowDAGFree(micWorkflowDAG *dag);                                 // Free DAG memory
+
+// Benchmark tracking
+MICAPI void micBenchmarkStart(micBenchmark *bm, const char *ruleName, const char *sample);  // Start benchmark
+MICAPI void micBenchmarkEnd(micBenchmark *bm);                                       // End benchmark
+MICAPI bool micBenchmarkSave(micBenchmark *bm, const char *filename);                // Save benchmark to file
+MICAPI micCSVFile *micBenchmarkLoadAll(const char *directory);                       // Load all benchmarks from directory
+
+// Multi-wildcard expansion
+MICAPI char **micExpandMultiWildcard(const char *pattern, micWildcardSet *wildcards, int wildcardCount, int *resultCount);  // Expand with multiple wildcards (Note: full multi-wildcard support for wildcardCount > 1 not yet implemented)
+MICAPI void micFreeWildcardSet(micWildcardSet *set);                                 // Free wildcard set
+
+// Temporary file management
+MICAPI void micMarkTemporary(const char *filepath);                                  // Mark file as temporary
+MICAPI void micCleanupTemporaryFiles(void);                                          // Cleanup all temporary files
+MICAPI bool micIsTemporary(const char *filepath);                                    // Check if file is temporary
+MICAPI int micGetTemporaryFileCount(void);                                           // Get number of temporary files
+
+// Resource management
+MICAPI void micRuleSetResources(micRule *rule, micResources *res);                   // Set resource requirements
+MICAPI bool micCheckResourcesAvailable(micResources *required);                      // Check if resources available
+MICAPI micResources micGetSystemResources(void);                                     // Get system resources
+
 #ifdef __cplusplus
 }
 #endif
@@ -528,6 +641,12 @@ struct micMutex {
 };
 #endif
 
+// Temporary file tracking
+typedef struct micTempFile {
+    char path[MAX_FILEPATH_LENGTH];
+    struct micTempFile *next;
+} micTempFile;
+
 typedef struct micData {
     int logTypeLevel;
     micTraceLogCallback traceLog;
@@ -541,6 +660,11 @@ typedef struct micData {
         micStepState *firstStep;
         const char *stateFileName;
     } Pipeline;
+    
+    struct {
+        micTempFile *firstFile;
+        int count;
+    } TempFiles;
 } micData;
 
 //----------------------------------------------------------------------------------
@@ -5408,6 +5532,867 @@ bool micEnsureOutputDir(const char *filePath)
     }
     
     return false;
+}
+
+//----------------------------------------------------------------------------------
+// Rule/Workflow Management Implementation
+//----------------------------------------------------------------------------------
+
+// Rule Management Functions
+
+// Create a new rule
+micRule *micRuleCreate(const char *name)
+{
+    if (name == NULL) return NULL;
+    
+    micRule *rule = (micRule *)MIC_CALLOC(1, sizeof(micRule));
+    if (rule == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to allocate memory for rule");
+        return NULL;
+    }
+    
+    strncpy(rule->name, name, sizeof(rule->name) - 1);
+    rule->inputs = NULL;
+    rule->inputCount = 0;
+    rule->outputs = NULL;
+    rule->outputCount = 0;
+    rule->shell = NULL;
+    rule->message = NULL;
+    rule->threads = 1;
+    rule->container = NULL;
+    rule->log = NULL;
+    rule->benchmark = NULL;
+    rule->temporary = false;
+    rule->inputFunc = NULL;
+    rule->inputFuncUserData = NULL;
+    rule->resources.memoryMB = 0;
+    rule->resources.cpuCores = 0;
+    rule->resources.gpuCount = 0;
+    rule->resources.diskMB = 0;
+    
+    micTraceLog(MIC_LOG_DEBUG, "Created rule: %s", name);
+    return rule;
+}
+
+// Add input pattern to rule
+void micRuleSetInput(micRule *rule, const char *pattern)
+{
+    if (rule == NULL || pattern == NULL) return;
+    
+    rule->inputs = (char **)MIC_REALLOC(rule->inputs, sizeof(char *) * (rule->inputCount + 1));
+    if (rule->inputs == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to allocate memory for rule input");
+        return;
+    }
+    
+    rule->inputs[rule->inputCount] = (char *)MIC_MALLOC(strlen(pattern) + 1);
+    if (rule->inputs[rule->inputCount] != NULL)
+    {
+        strcpy(rule->inputs[rule->inputCount], pattern);
+        rule->inputCount++;
+    }
+}
+
+// Add output pattern to rule
+void micRuleSetOutput(micRule *rule, const char *pattern)
+{
+    if (rule == NULL || pattern == NULL) return;
+    
+    rule->outputs = (char **)MIC_REALLOC(rule->outputs, sizeof(char *) * (rule->outputCount + 1));
+    if (rule->outputs == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to allocate memory for rule output");
+        return;
+    }
+    
+    rule->outputs[rule->outputCount] = (char *)MIC_MALLOC(strlen(pattern) + 1);
+    if (rule->outputs[rule->outputCount] != NULL)
+    {
+        strcpy(rule->outputs[rule->outputCount], pattern);
+        rule->outputCount++;
+    }
+}
+
+// Set shell command for rule
+void micRuleSetShell(micRule *rule, const char *command)
+{
+    if (rule == NULL || command == NULL) return;
+    
+    if (rule->shell != NULL) MIC_FREE(rule->shell);
+    
+    rule->shell = (char *)MIC_MALLOC(strlen(command) + 1);
+    if (rule->shell != NULL)
+    {
+        strcpy(rule->shell, command);
+    }
+}
+
+// Set container image for rule
+void micRuleSetContainer(micRule *rule, const char *imagePath)
+{
+    if (rule == NULL || imagePath == NULL) return;
+    
+    if (rule->container != NULL) MIC_FREE(rule->container);
+    
+    rule->container = (char *)MIC_MALLOC(strlen(imagePath) + 1);
+    if (rule->container != NULL)
+    {
+        strcpy(rule->container, imagePath);
+    }
+}
+
+// Set thread count for rule
+void micRuleSetThreads(micRule *rule, int threads)
+{
+    if (rule == NULL) return;
+    rule->threads = threads > 0 ? threads : 1;
+}
+
+// Set benchmark output file
+void micRuleSetBenchmark(micRule *rule, const char *path)
+{
+    if (rule == NULL || path == NULL) return;
+    
+    if (rule->benchmark != NULL) MIC_FREE(rule->benchmark);
+    
+    rule->benchmark = (char *)MIC_MALLOC(strlen(path) + 1);
+    if (rule->benchmark != NULL)
+    {
+        strcpy(rule->benchmark, path);
+    }
+}
+
+// Set log file path
+void micRuleSetLog(micRule *rule, const char *path)
+{
+    if (rule == NULL || path == NULL) return;
+    
+    if (rule->log != NULL) MIC_FREE(rule->log);
+    
+    rule->log = (char *)MIC_MALLOC(strlen(path) + 1);
+    if (rule->log != NULL)
+    {
+        strcpy(rule->log, path);
+    }
+}
+
+// Set progress message
+void micRuleSetMessage(micRule *rule, const char *message)
+{
+    if (rule == NULL || message == NULL) return;
+    
+    if (rule->message != NULL) MIC_FREE(rule->message);
+    
+    rule->message = (char *)MIC_MALLOC(strlen(message) + 1);
+    if (rule->message != NULL)
+    {
+        strcpy(rule->message, message);
+    }
+}
+
+// Mark outputs as temporary
+void micRuleSetTemporary(micRule *rule, bool temporary)
+{
+    if (rule == NULL) return;
+    rule->temporary = temporary;
+}
+
+// Set dynamic input function
+void micRuleSetInputFunction(micRule *rule, micInputFunction func, void *userData)
+{
+    if (rule == NULL) return;
+    rule->inputFunc = func;
+    rule->inputFuncUserData = userData;
+}
+
+// Execute rule with wildcards
+int micRuleExecute(micRule *rule, const char **wildcards, int wildcardCount)
+{
+    if (rule == NULL) return -1;
+    
+    micBenchmark bm = {0};
+    
+    // Show progress message
+    if (rule->message != NULL)
+    {
+        micTraceLog(MIC_LOG_INFO, "%s", rule->message);
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_INFO, "Executing rule: %s", rule->name);
+    }
+    
+    // Start benchmark if configured
+    if (rule->benchmark != NULL)
+    {
+        micBenchmarkStart(&bm, rule->name, wildcards && wildcardCount > 0 ? wildcards[0] : "");
+    }
+    
+    // Build command - simple implementation for now
+    // In a real implementation, this would substitute wildcards and input/output references
+    char command[4096] = {0};
+    if (rule->shell != NULL)
+    {
+        strncpy(command, rule->shell, sizeof(command) - 1);
+        command[sizeof(command) - 1] = '\0';  // Ensure null termination
+    }
+    
+    // Execute command
+    int result = 0;
+    if (strlen(command) > 0)
+    {
+        if (rule->container != NULL)
+        {
+            // Execute in container
+            result = micSingularityExec(rule->container, command, NULL);
+        }
+        else
+        {
+            // Direct execution
+            result = micExecuteCommand("%s", command);
+        }
+    }
+    
+    // End benchmark
+    if (rule->benchmark != NULL)
+    {
+        micBenchmarkEnd(&bm);
+        
+        // Ensure benchmark directory exists
+        micEnsureOutputDir(rule->benchmark);
+        
+        // Save benchmark
+        micBenchmarkSave(&bm, rule->benchmark);
+    }
+    
+    // Mark outputs as temporary if configured
+    if (rule->temporary && result == 0)
+    {
+        for (int i = 0; i < rule->outputCount; i++)
+        {
+            micMarkTemporary(rule->outputs[i]);
+        }
+    }
+    
+    return result;
+}
+
+// Free rule memory
+void micRuleFree(micRule *rule)
+{
+    if (rule == NULL) return;
+    
+    // Free inputs
+    if (rule->inputs != NULL)
+    {
+        for (int i = 0; i < rule->inputCount; i++)
+        {
+            if (rule->inputs[i] != NULL) MIC_FREE(rule->inputs[i]);
+        }
+        MIC_FREE(rule->inputs);
+    }
+    
+    // Free outputs
+    if (rule->outputs != NULL)
+    {
+        for (int i = 0; i < rule->outputCount; i++)
+        {
+            if (rule->outputs[i] != NULL) MIC_FREE(rule->outputs[i]);
+        }
+        MIC_FREE(rule->outputs);
+    }
+    
+    // Free strings
+    if (rule->shell != NULL) MIC_FREE(rule->shell);
+    if (rule->message != NULL) MIC_FREE(rule->message);
+    if (rule->container != NULL) MIC_FREE(rule->container);
+    if (rule->log != NULL) MIC_FREE(rule->log);
+    if (rule->benchmark != NULL) MIC_FREE(rule->benchmark);
+    
+    MIC_FREE(rule);
+}
+
+// Rule Inheritance/Copying Functions
+
+// Copy rule with new name
+micRule *micRuleCopy(micRule *source, const char *newName)
+{
+    if (source == NULL || newName == NULL) return NULL;
+    
+    micRule *copy = micRuleCreate(newName);
+    if (copy == NULL) return NULL;
+    
+    // Copy inputs
+    for (int i = 0; i < source->inputCount; i++)
+    {
+        micRuleSetInput(copy, source->inputs[i]);
+    }
+    
+    // Copy outputs
+    for (int i = 0; i < source->outputCount; i++)
+    {
+        micRuleSetOutput(copy, source->outputs[i]);
+    }
+    
+    // Copy other properties
+    if (source->shell != NULL) micRuleSetShell(copy, source->shell);
+    if (source->message != NULL) micRuleSetMessage(copy, source->message);
+    if (source->container != NULL) micRuleSetContainer(copy, source->container);
+    if (source->log != NULL) micRuleSetLog(copy, source->log);
+    if (source->benchmark != NULL) micRuleSetBenchmark(copy, source->benchmark);
+    
+    copy->threads = source->threads;
+    copy->temporary = source->temporary;
+    copy->resources = source->resources;
+    copy->inputFunc = source->inputFunc;
+    copy->inputFuncUserData = source->inputFuncUserData;
+    
+    return copy;
+}
+
+// Override shell command
+void micRuleOverrideShell(micRule *rule, const char *newShell)
+{
+    micRuleSetShell(rule, newShell);
+}
+
+// Override input at index
+void micRuleOverrideInput(micRule *rule, int index, const char *newInput)
+{
+    if (rule == NULL || newInput == NULL) return;
+    if (index < 0 || index >= rule->inputCount) return;
+    
+    if (rule->inputs[index] != NULL) MIC_FREE(rule->inputs[index]);
+    
+    rule->inputs[index] = (char *)MIC_MALLOC(strlen(newInput) + 1);
+    if (rule->inputs[index] != NULL)
+    {
+        strcpy(rule->inputs[index], newInput);
+    }
+}
+
+// Override output at index
+void micRuleOverrideOutput(micRule *rule, int index, const char *newOutput)
+{
+    if (rule == NULL || newOutput == NULL) return;
+    if (index < 0 || index >= rule->outputCount) return;
+    
+    if (rule->outputs[index] != NULL) MIC_FREE(rule->outputs[index]);
+    
+    rule->outputs[index] = (char *)MIC_MALLOC(strlen(newOutput) + 1);
+    if (rule->outputs[index] != NULL)
+    {
+        strcpy(rule->outputs[index], newOutput);
+    }
+}
+
+// Workflow DAG Functions
+
+// Create workflow DAG
+micWorkflowDAG *micWorkflowDAGCreate(void)
+{
+    micWorkflowDAG *dag = (micWorkflowDAG *)MIC_CALLOC(1, sizeof(micWorkflowDAG));
+    if (dag == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to allocate memory for workflow DAG");
+        return NULL;
+    }
+    
+    dag->rules = NULL;
+    dag->ruleCount = 0;
+    dag->ruleCapacity = 0;
+    dag->workDir = NULL;
+    dag->config.count = 0;
+    dag->samples.samples = NULL;
+    dag->samples.count = 0;
+    
+    micTraceLog(MIC_LOG_DEBUG, "Created workflow DAG");
+    return dag;
+}
+
+// Add rule to DAG
+void micWorkflowDAGAddRule(micWorkflowDAG *dag, micRule *rule)
+{
+    if (dag == NULL || rule == NULL) return;
+    
+    // Expand capacity if needed
+    if (dag->ruleCount >= dag->ruleCapacity)
+    {
+        int newCapacity = dag->ruleCapacity == 0 ? 10 : dag->ruleCapacity * 2;
+        micRule **newRules = (micRule **)MIC_REALLOC(dag->rules, sizeof(micRule *) * newCapacity);
+        if (newRules == NULL)
+        {
+            micTraceLog(MIC_LOG_ERROR, "Failed to expand DAG capacity");
+            return;
+        }
+        dag->rules = newRules;
+        dag->ruleCapacity = newCapacity;
+    }
+    
+    dag->rules[dag->ruleCount++] = rule;
+    micTraceLog(MIC_LOG_DEBUG, "Added rule '%s' to DAG", rule->name);
+}
+
+// Set working directory for DAG
+void micWorkflowDAGSetWorkDir(micWorkflowDAG *dag, const char *workDir)
+{
+    if (dag == NULL || workDir == NULL) return;
+    
+    if (dag->workDir != NULL) MIC_FREE(dag->workDir);
+    
+    dag->workDir = (char *)MIC_MALLOC(strlen(workDir) + 1);
+    if (dag->workDir != NULL)
+    {
+        strcpy(dag->workDir, workDir);
+    }
+}
+
+// Execute workflow DAG
+int micWorkflowDAGExecute(micWorkflowDAG *dag, const char *target)
+{
+    if (dag == NULL) return -1;
+    
+    micTraceLog(MIC_LOG_INFO, "Executing workflow DAG targeting: %s", target ? target : "all");
+    
+    // Simple execution: just execute all rules in order
+    // A real implementation would build dependency graph and execute in correct order
+    int failedCount = 0;
+    
+    for (int i = 0; i < dag->ruleCount; i++)
+    {
+        int result = micRuleExecute(dag->rules[i], NULL, 0);
+        if (result != 0)
+        {
+            micTraceLog(MIC_LOG_ERROR, "Rule '%s' failed with code %d", dag->rules[i]->name, result);
+            failedCount++;
+        }
+    }
+    
+    if (failedCount == 0)
+    {
+        micTraceLog(MIC_LOG_INFO, "Workflow completed successfully");
+    }
+    else
+    {
+        micTraceLog(MIC_LOG_WARNING, "Workflow completed with %d failed rules", failedCount);
+    }
+    
+    return failedCount;
+}
+
+// Free workflow DAG
+void micWorkflowDAGFree(micWorkflowDAG *dag)
+{
+    if (dag == NULL) return;
+    
+    // Free rules
+    if (dag->rules != NULL)
+    {
+        for (int i = 0; i < dag->ruleCount; i++)
+        {
+            micRuleFree(dag->rules[i]);
+        }
+        MIC_FREE(dag->rules);
+    }
+    
+    // Free work directory
+    if (dag->workDir != NULL) MIC_FREE(dag->workDir);
+    
+    // Free config and samples
+    micConfigFree(&dag->config);
+    micFreeSampleList(&dag->samples);
+    
+    MIC_FREE(dag);
+    micTraceLog(MIC_LOG_DEBUG, "Freed workflow DAG");
+}
+
+// Benchmark Functions
+
+// Start benchmark
+void micBenchmarkStart(micBenchmark *bm, const char *ruleName, const char *sample)
+{
+    if (bm == NULL) return;
+    
+    memset(bm, 0, sizeof(micBenchmark));
+    
+    if (ruleName != NULL)
+    {
+        strncpy(bm->ruleName, ruleName, sizeof(bm->ruleName) - 1);
+    }
+    
+    if (sample != NULL)
+    {
+        strncpy(bm->sample, sample, sizeof(bm->sample) - 1);
+    }
+    
+    bm->timestamp = micGetTimeStamp();
+    
+    // Record start time (platform-specific)
+#if defined(_WIN32)
+    bm->startTime = (double)GetTickCount64() / 1000.0;
+#elif defined(__linux__)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    bm->startTime = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+#elif defined(__APPLE__)
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    bm->startTime = (double)mts.tv_sec + (double)mts.tv_nsec / 1000000000.0;
+#else
+    bm->startTime = 0.0;
+#endif
+    
+    bm->startClock = clock();
+}
+
+// End benchmark
+void micBenchmarkEnd(micBenchmark *bm)
+{
+    if (bm == NULL) return;
+    
+    // Record end time (platform-specific)
+#if defined(_WIN32)
+    double endTime = (double)GetTickCount64() / 1000.0;
+    bm->wallTime = endTime - bm->startTime;
+#elif defined(__linux__)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double endTime = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+    bm->wallTime = endTime - bm->startTime;
+#elif defined(__APPLE__)
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    double endTime = (double)mts.tv_sec + (double)mts.tv_nsec / 1000000000.0;
+    bm->wallTime = endTime - bm->startTime;
+#else
+    bm->wallTime = 0.0;
+#endif
+    
+    clock_t endClock = clock();
+    bm->cpuTime = (double)(endClock - bm->startClock) / CLOCKS_PER_SEC;
+    
+    // Get memory usage (platform-specific)
+#if defined(__linux__)
+    FILE *fp = fopen("/proc/self/status", "r");
+    if (fp != NULL)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
+        {
+            if (strncmp(line, "VmHWM:", 6) == 0)
+            {
+                long memKB;
+                sscanf(line + 6, "%ld", &memKB);
+                bm->maxRSS = (double)memKB;
+                break;
+            }
+        }
+        fclose(fp);
+    }
+#elif defined(__APPLE__)
+    // macOS implementation would go here
+    bm->maxRSS = 0.0;
+#else
+    bm->maxRSS = 0.0;
+#endif
+}
+
+// Save benchmark to file
+bool micBenchmarkSave(micBenchmark *bm, const char *filename)
+{
+    if (bm == NULL || filename == NULL) return false;
+    
+    // Check if file exists to determine if we need headers
+    bool fileExists = micIsFileAvailable(filename);
+    
+    FILE *fp = fopen(filename, "a");
+    if (fp == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to open benchmark file: %s", filename);
+        return false;
+    }
+    
+    // Write header if new file
+    if (!fileExists)
+    {
+        fprintf(fp, "ruleName,sample,wallTime,cpuTime,maxRSS,timestamp\n");
+    }
+    
+    // Write benchmark data
+    fprintf(fp, "%s,%s,%.4f,%.4f,%.2f,%ld\n",
+            bm->ruleName, bm->sample, bm->wallTime, bm->cpuTime, bm->maxRSS, bm->timestamp);
+    
+    fclose(fp);
+    
+    micTraceLog(MIC_LOG_DEBUG, "Saved benchmark for %s: %.2fs", bm->ruleName, bm->wallTime);
+    return true;
+}
+
+// Load all benchmarks from directory
+micCSVFile *micBenchmarkLoadAll(const char *directory)
+{
+    if (directory == NULL) return NULL;
+    
+    // Simple implementation: assumes a single benchmark.csv file
+    char filepath[MAX_FILEPATH_LENGTH];
+    snprintf(filepath, sizeof(filepath), "%s/benchmark.csv", directory);
+    
+    if (!micIsFileAvailable(filepath))
+    {
+        micTraceLog(MIC_LOG_WARNING, "Benchmark file not found: %s", filepath);
+        return NULL;
+    }
+    
+    return micLoadCSV(filepath, ',', true);
+}
+
+// Multi-Wildcard Expansion Functions
+
+// Expand pattern with multiple wildcards
+char **micExpandMultiWildcard(const char *pattern, micWildcardSet *wildcards, int wildcardCount, int *resultCount)
+{
+    if (pattern == NULL || wildcards == NULL || wildcardCount <= 0 || resultCount == NULL)
+    {
+        if (resultCount != NULL) *resultCount = 0;
+        return NULL;
+    }
+    
+    // Calculate total combinations
+    int totalCombos = 1;
+    for (int i = 0; i < wildcardCount; i++)
+    {
+        if (wildcards[i].count > 0)
+        {
+            totalCombos *= wildcards[i].count;
+        }
+    }
+    
+    if (totalCombos == 0)
+    {
+        *resultCount = 0;
+        return NULL;
+    }
+    
+    // Allocate result array
+    char **results = (char **)MIC_MALLOC(sizeof(char *) * totalCombos);
+    if (results == NULL)
+    {
+        *resultCount = 0;
+        return NULL;
+    }
+    
+    // Generate all combinations
+    int resultIndex = 0;
+    
+    // Simple implementation for single wildcard
+    if (wildcardCount == 1)
+    {
+        for (int i = 0; i < wildcards[0].count; i++)
+        {
+            char *expanded = micReplaceWildcard(pattern, wildcards[0].name, wildcards[0].values[i]);
+            if (expanded != NULL)
+            {
+                results[resultIndex++] = expanded;
+            }
+        }
+    }
+    else
+    {
+        // Multi-wildcard expansion - simplified version
+        // A complete implementation would need recursive expansion
+        micTraceLog(MIC_LOG_WARNING, "Multi-wildcard expansion not fully implemented");
+        results[0] = (char *)MIC_MALLOC(strlen(pattern) + 1);
+        if (results[0] != NULL)
+        {
+            strcpy(results[0], pattern);
+            resultIndex = 1;
+        }
+    }
+    
+    *resultCount = resultIndex;
+    return results;
+}
+
+// Free wildcard set
+void micFreeWildcardSet(micWildcardSet *set)
+{
+    if (set == NULL) return;
+    
+    if (set->values != NULL)
+    {
+        for (int i = 0; i < set->count; i++)
+        {
+            if (set->values[i] != NULL) MIC_FREE(set->values[i]);
+        }
+        MIC_FREE(set->values);
+    }
+}
+
+// Temporary File Management Functions
+
+// Mark file as temporary
+void micMarkTemporary(const char *filepath)
+{
+    if (filepath == NULL) return;
+    
+    // Check if already marked
+    micTempFile *current = MIC.TempFiles.firstFile;
+    while (current != NULL)
+    {
+        if (strcmp(current->path, filepath) == 0) return;
+        current = current->next;
+    }
+    
+    // Add to temporary files list
+    micTempFile *tempFile = (micTempFile *)MIC_MALLOC(sizeof(micTempFile));
+    if (tempFile == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to allocate memory for temporary file entry");
+        return;
+    }
+    
+    strncpy(tempFile->path, filepath, sizeof(tempFile->path) - 1);
+    tempFile->path[sizeof(tempFile->path) - 1] = '\0';  // Ensure null termination
+    tempFile->next = MIC.TempFiles.firstFile;
+    MIC.TempFiles.firstFile = tempFile;
+    MIC.TempFiles.count++;
+    
+    micTraceLog(MIC_LOG_DEBUG, "Marked temporary file: %s", filepath);
+}
+
+// Cleanup all temporary files
+void micCleanupTemporaryFiles(void)
+{
+    micTempFile *current = MIC.TempFiles.firstFile;
+    int deletedCount = 0;
+    
+    while (current != NULL)
+    {
+        if (micIsFileAvailable(current->path))
+        {
+            if (micDeleteFile(current->path) == 0)
+            {
+                deletedCount++;
+                micTraceLog(MIC_LOG_DEBUG, "Deleted temporary file: %s", current->path);
+            }
+            else
+            {
+                micTraceLog(MIC_LOG_WARNING, "Failed to delete temporary file: %s", current->path);
+            }
+        }
+        
+        micTempFile *next = current->next;
+        MIC_FREE(current);
+        current = next;
+    }
+    
+    MIC.TempFiles.firstFile = NULL;
+    MIC.TempFiles.count = 0;
+    
+    micTraceLog(MIC_LOG_INFO, "Cleaned up %d temporary files", deletedCount);
+}
+
+// Check if file is temporary
+bool micIsTemporary(const char *filepath)
+{
+    if (filepath == NULL) return false;
+    
+    micTempFile *current = MIC.TempFiles.firstFile;
+    while (current != NULL)
+    {
+        if (strcmp(current->path, filepath) == 0) return true;
+        current = current->next;
+    }
+    
+    return false;
+}
+
+// Get temporary file count
+int micGetTemporaryFileCount(void)
+{
+    return MIC.TempFiles.count;
+}
+
+// Resource Management Functions
+
+// Set resource requirements for rule
+void micRuleSetResources(micRule *rule, micResources *res)
+{
+    if (rule == NULL || res == NULL) return;
+    rule->resources = *res;
+}
+
+// Check if resources are available
+bool micCheckResourcesAvailable(micResources *required)
+{
+    if (required == NULL) return true;
+    
+    micResources available = micGetSystemResources();
+    
+    if (required->memoryMB > 0 && available.memoryMB < required->memoryMB) return false;
+    if (required->cpuCores > 0 && available.cpuCores < required->cpuCores) return false;
+    if (required->gpuCount > 0 && available.gpuCount < required->gpuCount) return false;
+    if (required->diskMB > 0 && available.diskMB < required->diskMB) return false;
+    
+    return true;
+}
+
+// Get system resources
+micResources micGetSystemResources(void)
+{
+    micResources res = {0};
+    
+    // Get CPU cores
+#if defined(_WIN32)
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    res.cpuCores = sysinfo.dwNumberOfProcessors;
+#elif defined(__linux__) || defined(__APPLE__)
+    res.cpuCores = (int)sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    res.cpuCores = 1;
+#endif
+    
+    // Get memory (simplified, in MB)
+#if defined(__linux__)
+    FILE *fp = fopen("/proc/meminfo", "r");
+    if (fp != NULL)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
+        {
+            if (strncmp(line, "MemTotal:", 9) == 0)
+            {
+                long memKB;
+                sscanf(line + 9, "%ld", &memKB);
+                res.memoryMB = (int)(memKB / 1024);
+                break;
+            }
+        }
+        fclose(fp);
+    }
+#elif defined(__APPLE__)
+    // TODO: Use sysctl() with CTL_HW and HW_MEMSIZE for actual memory detection
+    res.memoryMB = 8192; // Default fallback value
+#else
+    res.memoryMB = 4096; // Default value
+#endif
+    
+    // GPU count - simplified (would need CUDA/OpenCL APIs)
+    res.gpuCount = 0;
+    
+    // Disk space - simplified
+    res.diskMB = 100000; // Default value
+    
+    return res;
 }
 
 #endif   // MIC_IMPLEMENTATION

@@ -57,6 +57,7 @@ advanced_example
 real_world_example
 hpc_example
 bioinformatics_example
+rule_example
 storage.data
 test_mic_*
 pipeline_*

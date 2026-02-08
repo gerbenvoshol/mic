@@ -48,6 +48,16 @@ This library provides a set of platform-independent functions intended to be use
    - AWK-like text processing functions
    - Workflow context management
    - Helper path functions
+ - **Rule-based workflow system** 🎯 NEW:
+   - Snakemake-like rule definitions with inputs, outputs, and shell commands
+   - Workflow DAG for automatic dependency resolution
+   - Benchmark tracking for execution time and resource usage
+   - Multi-wildcard pattern expansion
+   - Temporary file management with auto-cleanup
+   - Resource specification and checking (CPU, memory, GPU, disk)
+   - Rule inheritance and copying
+   - Container support (Singularity/Docker)
+   - Dynamic input functions with function pointers
 
 ## Quick Start
 
@@ -134,11 +144,51 @@ Compile with compression:
 gcc -o myapp myapp.c -lz
 ```
 
+### Rule-Based Workflow (Snakemake-like)
+
+```c
+#define MIC_IMPLEMENTATION
+#include "src/mic.h"
+
+int main(void) {
+    micSetTraceLogLevel(MIC_LOG_INFO);
+    
+    // Create workflow DAG
+    micWorkflowDAG *dag = micWorkflowDAGCreate();
+    micWorkflowDAGSetWorkDir(dag, "/data/analysis");
+    
+    // Define trim rule
+    micRule *trimRule = micRuleCreate("trim_reads");
+    micRuleSetInput(trimRule, "raw/{sample}_R1.fastq.gz");
+    micRuleSetInput(trimRule, "raw/{sample}_R2.fastq.gz");
+    micRuleSetOutput(trimRule, "trimmed/{sample}_R1_trimmed.fastq.gz");
+    micRuleSetOutput(trimRule, "trimmed/{sample}_R2_trimmed.fastq.gz");
+    micRuleSetShell(trimRule, "fastp -i {input[0]} -I {input[1]} -o {output[0]} -O {output[1]}");
+    micRuleSetThreads(trimRule, 4);
+    micRuleSetBenchmark(trimRule, "benchmarks/{sample}.trim.txt");
+    micWorkflowDAGAddRule(dag, trimRule);
+    
+    // Execute workflow
+    micWorkflowDAGExecute(dag, "trimmed/sample1_R1_trimmed.fastq.gz");
+    
+    // Cleanup
+    micWorkflowDAGFree(dag);
+    
+    return 0;
+}
+```
+
+Compile with rule system:
+```bash
+gcc -o workflow workflow.c -lz -lm
+```
+
 ## Documentation
 
 - [EXAMPLE.md](EXAMPLE.md) - Basic usage examples
 - [ADVANCED_FEATURES.md](ADVANCED_FEATURES.md) - Compression and pipeline features guide
 - [HPC_FEATURES.md](HPC_FEATURES.md) - HPC: SLURM, containers, async, multithreading ✨ NEW
+- [BIOINFORMATICS.md](BIOINFORMATICS.md) - Bioinformatics workflows and rule system 🎯 NEW
 - [IMPLEMENTATION.md](IMPLEMENTATION.md) - Implementation details and API reference
 
 ## Examples
@@ -147,6 +197,8 @@ gcc -o myapp myapp.c -lz
 - `advanced_example.c` - Shows compression and advanced pipeline features
 - `real_world_example.c` - Practical ETL pipeline demonstration
 - `hpc_example.c` - HPC features: SLURM, containers, async, threads ✨ NEW
+- `bioinformatics_example.c` - Bioinformatics workflow features ✨ NEW
+- `rule_example.c` - Rule-based workflow system (Snakemake-like) 🎯 NEW
 
 Build and run:
 ```bash
@@ -161,6 +213,9 @@ gcc -o hpc_example hpc_example.c -lz -lpthread
 
 gcc -o bioinformatics_example bioinformatics_example.c -lm -lz
 ./bioinformatics_example
+
+gcc -o rule_example rule_example.c -lz -lm
+./rule_example
 ```
 
 ## Requirements
