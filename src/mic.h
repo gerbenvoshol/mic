@@ -498,7 +498,7 @@ MICAPI bool micBenchmarkSave(micBenchmark *bm, const char *filename);           
 MICAPI micCSVFile *micBenchmarkLoadAll(const char *directory);                       // Load all benchmarks from directory
 
 // Multi-wildcard expansion
-MICAPI char **micExpandMultiWildcard(const char *pattern, micWildcardSet *wildcards, int wildcardCount, int *resultCount);  // Expand with multiple wildcards
+MICAPI char **micExpandMultiWildcard(const char *pattern, micWildcardSet *wildcards, int wildcardCount, int *resultCount);  // Expand with multiple wildcards (Note: full multi-wildcard support for wildcardCount > 1 not yet implemented)
 MICAPI void micFreeWildcardSet(micWildcardSet *set);                                 // Free wildcard set
 
 // Temporary file management
@@ -5736,6 +5736,7 @@ int micRuleExecute(micRule *rule, const char **wildcards, int wildcardCount)
     if (rule->shell != NULL)
     {
         strncpy(command, rule->shell, sizeof(command) - 1);
+        command[sizeof(command) - 1] = '\0';  // Ensure null termination
     }
     
     // Execute command
@@ -6030,7 +6031,7 @@ void micBenchmarkStart(micBenchmark *bm, const char *ruleName, const char *sampl
     
     // Record start time (platform-specific)
 #if defined(_WIN32)
-    bm->startTime = (double)GetTickCount() / 1000.0;
+    bm->startTime = (double)GetTickCount64() / 1000.0;
 #elif defined(__linux__)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -6056,7 +6057,7 @@ void micBenchmarkEnd(micBenchmark *bm)
     
     // Record end time (platform-specific)
 #if defined(_WIN32)
-    double endTime = (double)GetTickCount() / 1000.0;
+    double endTime = (double)GetTickCount64() / 1000.0;
     bm->wallTime = endTime - bm->startTime;
 #elif defined(__linux__)
     struct timespec ts;
@@ -6088,7 +6089,9 @@ void micBenchmarkEnd(micBenchmark *bm)
         {
             if (strncmp(line, "VmHWM:", 6) == 0)
             {
-                sscanf(line + 6, "%lf", &bm->maxRSS);
+                long memKB;
+                sscanf(line + 6, "%ld", &memKB);
+                bm->maxRSS = (double)memKB;
                 break;
             }
         }
@@ -6257,6 +6260,7 @@ void micMarkTemporary(const char *filepath)
     }
     
     strncpy(tempFile->path, filepath, sizeof(tempFile->path) - 1);
+    tempFile->path[sizeof(tempFile->path) - 1] = '\0';  // Ensure null termination
     tempFile->next = MIC.TempFiles.firstFile;
     MIC.TempFiles.firstFile = tempFile;
     MIC.TempFiles.count++;
@@ -6376,8 +6380,8 @@ micResources micGetSystemResources(void)
         fclose(fp);
     }
 #elif defined(__APPLE__)
-    // macOS implementation would go here
-    res.memoryMB = 8192; // Default value
+    // TODO: Use sysctl() with CTL_HW and HW_MEMSIZE for actual memory detection
+    res.memoryMB = 8192; // Default fallback value
 #else
     res.memoryMB = 4096; // Default value
 #endif

@@ -114,7 +114,7 @@ int main(void)
     for (int i = 0; i < wildcard.count; i++)
     {
         wildcard.values[i] = (char *)MIC_MALLOC(64);
-        sprintf(wildcard.values[i], "sample%d", i + 1);
+        snprintf(wildcard.values[i], 64, "sample%d", i + 1);
     }
     
     int expandCount = 0;
