@@ -3811,7 +3811,7 @@ int micLoadConfig(micConfig *config, const char *fileName)
         
         // Extract key and value
         int keyLen = eq - line;
-        if (keyLen >= 256) continue;
+        if (keyLen >= 255) continue;  // Leave room for null terminator
         
         strncpy(config->entries[config->count].key, line, keyLen);
         config->entries[config->count].key[keyLen] = '\0';
@@ -3833,8 +3833,11 @@ int micLoadConfig(micConfig *config, const char *fileName)
         
         // Copy value
         const char *value = eq + 1;
-        strncpy(config->entries[config->count].value, value, 1023);
-        config->entries[config->count].value[1023] = '\0';
+        int valueLen = strlen(value);
+        if (valueLen >= 1024) valueLen = 1023;  // Limit to buffer size - 1
+        
+        strncpy(config->entries[config->count].value, value, valueLen);
+        config->entries[config->count].value[valueLen] = '\0';
         
         // Trim whitespace from value
         int vlen = strlen(config->entries[config->count].value);
@@ -3892,7 +3895,7 @@ int micLoadConfigJSON(micConfig *config, const char *fileName)
         
         // Extract key
         int keyLen = keyEnd - keyStart;
-        if (keyLen >= 256) { ptr = keyEnd + 1; continue; }
+        if (keyLen >= 255) { ptr = keyEnd + 1; continue; }  // Leave room for null terminator
         
         strncpy(config->entries[config->count].key, keyStart, keyLen);
         config->entries[config->count].key[keyLen] = '\0';
@@ -4252,11 +4255,16 @@ char **micExpandWithMap(const char *pattern, const char **keys, const char **val
     
     *count = 0;
     
+    // Check pattern length
+    int patternLen = strlen(pattern);
+    if (patternLen >= MIC_MAX_PATTERN_LENGTH) return NULL;
+    
     // For single expansion with multiple replacements
     char *result = (char *)MIC_MALLOC(MIC_MAX_PATTERN_LENGTH);
     if (result == NULL) return NULL;
     
-    strcpy(result, pattern);
+    strncpy(result, pattern, MIC_MAX_PATTERN_LENGTH - 1);
+    result[MIC_MAX_PATTERN_LENGTH - 1] = '\0';
     
     // Replace each wildcard
     for (int i = 0; i < mapSize; i++)
@@ -4264,7 +4272,12 @@ char **micExpandWithMap(const char *pattern, const char **keys, const char **val
         char *temp = micReplaceWildcard(result, keys[i], values[i]);
         if (temp != NULL)
         {
-            strcpy(result, temp);
+            int tempLen = strlen(temp);
+            if (tempLen < MIC_MAX_PATTERN_LENGTH)
+            {
+                strncpy(result, temp, MIC_MAX_PATTERN_LENGTH - 1);
+                result[MIC_MAX_PATTERN_LENGTH - 1] = '\0';
+            }
             MIC_FREE(temp);
         }
     }
@@ -4547,14 +4560,17 @@ micCSVFile *micLoadCSV(const char *fileName, char delimiter, bool hasHeader)
                     
                     // Trim whitespace and quotes
                     const char *start = fields[j];
-                    const char *end = fields[j] + len - 1;
+                    const char *end = fields[j] + len;
                     
-                    while (*start == ' ' || *start == '\t' || *start == '"') start++;
-                    while (end > start && (*end == ' ' || *end == '\t' || *end == '"' || 
+                    // Move start forward past whitespace and quotes
+                    while (start < end && (*start == ' ' || *start == '\t' || *start == '"')) start++;
+                    
+                    // Move end backward to last non-whitespace character
+                    end--;  // Move to last character
+                    while (end >= start && (*end == ' ' || *end == '\t' || *end == '"' || 
                            *end == '\r' || *end == '\n')) end--;
                     
-                    int trimLen = end - start + 1;
-                    if (trimLen < 0) trimLen = 0;
+                    int trimLen = (end >= start) ? (end - start + 1) : 0;
                     
                     csv->rows[csv->rowCount].fields[j] = (char *)MIC_MALLOC(trimLen + 1);
                     if (csv->rows[csv->rowCount].fields[j] != NULL)
@@ -5127,6 +5143,9 @@ char *micTailLines(const char *text, int n)
 }
 
 // Sort lines by field
+// WARNING: This uses bubble sort with O(n²) complexity. 
+// For large datasets (>1000 lines), this may be slow.
+// Consider limiting line count or using qsort for production use.
 char *micSortByField(const char *text, int fieldIndex, char delimiter, bool descending, bool numeric)
 {
     if (text == NULL || fieldIndex < 0) return NULL;
@@ -5136,8 +5155,14 @@ char *micSortByField(const char *text, int fieldIndex, char delimiter, bool desc
     
     if (lineCount == 0) return NULL;
     
-    // Simple bubble sort (for small datasets)
-    // In production, use qsort with custom comparator
+    // Limit sorting to reasonable size for bubble sort
+    if (lineCount > 10000)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Sorting %d lines may be slow with bubble sort", lineCount);
+    }
+    
+    // Simple bubble sort (acceptable for small-medium datasets)
+    // For production with large datasets, replace with qsort and custom comparator
     const char **sortedLines = (const char **)MIC_MALLOC(lineCount * sizeof(char *));
     if (sortedLines == NULL) return NULL;
     
