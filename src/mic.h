@@ -90,6 +90,13 @@
 #define MAX_DIRECTORY_FILES             10000    // Maximum files to list in a directory (prevents overflow)
 #define MAX_ZIP_ENTRIES                 1000     // Maximum files in a ZIP archive (memory limit)
 
+// Bioinformatics workflow constants
+#define MIC_MAX_SAMPLES                 1000     // Maximum number of samples in a workflow
+#define MIC_MAX_PATTERN_LENGTH          512      // Maximum length of file patterns
+#define MIC_MAX_CONFIG_ENTRIES          256      // Maximum configuration entries
+#define MIC_MAX_CSV_FIELDS              256      // Maximum fields per CSV row
+#define MIC_MAX_CSV_ROWS                100000   // Maximum rows in a CSV file
+
 
 //----------------------------------------------------------------------------------
 // Defines and Macros
@@ -122,6 +129,48 @@ typedef enum {
 
 // Callbacks to hook some internal functions
 typedef void (*micTraceLogCallback)(int logLevel, const char *text, va_list args);  // Logging: Redirect trace log messages
+
+// Bioinformatics workflow structures
+// Configuration entry
+typedef struct {
+    char key[256];
+    char value[1024];
+} micConfigEntry;
+
+// Configuration structure
+typedef struct {
+    micConfigEntry entries[MIC_MAX_CONFIG_ENTRIES];
+    int count;
+} micConfig;
+
+// Sample list
+typedef struct {
+    char **samples;
+    int count;
+} micSampleList;
+
+// CSV structures
+typedef struct {
+    char **fields;
+    int fieldCount;
+} micCSVRow;
+
+typedef struct {
+    micCSVRow *rows;
+    int rowCount;
+    char **headers;
+    int headerCount;
+    char delimiter;
+} micCSVFile;
+
+// Workflow context
+typedef struct {
+    micConfig config;
+    micSampleList samples;
+    char workDir[MAX_FILEPATH_LENGTH];
+    char **expandedFiles;
+    int expandedCount;
+} micWorkflow;
 
 //----------------------------------------------------------------------------------
 // Module Functions Declaration
@@ -279,6 +328,76 @@ MICAPI void micMutexLock(micMutex *mutex);                             // Lock m
 MICAPI void micMutexUnlock(micMutex *mutex);                           // Unlock mutex
 MICAPI int micGetNumCores(void);                                        // Get number of CPU cores
 #endif
+
+// Bioinformatics Workflow Functions
+
+// Configuration management
+MICAPI int micLoadConfig(micConfig *config, const char *fileName);              // Load configuration from key=value file
+MICAPI int micLoadConfigJSON(micConfig *config, const char *fileName);          // Load configuration from JSON file
+MICAPI const char *micConfigGet(micConfig *config, const char *key);            // Get configuration value by key
+MICAPI const char *micConfigGetDefault(micConfig *config, const char *key, const char *defaultValue);  // Get with default
+MICAPI void micConfigSet(micConfig *config, const char *key, const char *value);  // Set configuration value
+MICAPI void micConfigFree(micConfig *config);                                   // Free configuration memory
+
+// Sample list management
+MICAPI int micLoadSamplesJSON(micSampleList *samples, const char *fileName);    // Load samples from JSON file
+MICAPI int micLoadSamplesList(micSampleList *samples, const char *fileName);    // Load samples from text file (one per line)
+MICAPI int micCreateSampleList(micSampleList *samples, const char **sampleNames, int count);  // Create from array
+MICAPI const char *micGetSample(micSampleList *samples, int index);             // Get sample by index
+MICAPI void micFreeSampleList(micSampleList *samples);                          // Free sample list memory
+
+// File pattern expansion (Snakemake-like expand)
+MICAPI char **micExpand(const char *pattern, micSampleList *samples, int *count);  // Expand pattern with sample list
+MICAPI char **micExpandWithMap(const char *pattern, const char **keys, const char **values, int mapSize, int *count);  // Expand with key-value map
+MICAPI void micFreeExpandedFiles(char **files, int count);                      // Free expanded file list
+MICAPI bool micAllFilesExist(char **files, int count);                          // Check if all files exist
+MICAPI bool micWaitForAllFiles(char **files, int count, int timeoutMs);         // Wait for files with timeout
+
+// Wildcard/pattern functions
+MICAPI char *micExtractWildcard(const char *pattern, const char *fileName, const char *wildcardName);  // Extract wildcard value
+MICAPI char *micReplaceWildcard(const char *pattern, const char *wildcardName, const char *value);     // Replace wildcard
+MICAPI char **micGetWildcards(const char *pattern, int *count);                 // Get all wildcard names from pattern
+
+// CSV file operations
+MICAPI micCSVFile *micLoadCSV(const char *fileName, char delimiter, bool hasHeader);  // Load CSV file
+MICAPI bool micSaveCSV(const char *fileName, micCSVFile *csv);                  // Save CSV file
+MICAPI const char *micCSVGetValue(micCSVFile *csv, int row, int col);           // Get value by indices
+MICAPI const char *micCSVGetValueByName(micCSVFile *csv, int row, const char *headerName);  // Get by header name
+MICAPI bool micCSVAddRow(micCSVFile *csv, const char **fields, int fieldCount); // Add row
+MICAPI micCSVFile *micCSVCreate(const char **headers, int headerCount, char delimiter);  // Create empty CSV
+MICAPI void micFreeCSV(micCSVFile *csv);                                         // Free CSV file
+MICAPI double micCSVSumColumn(micCSVFile *csv, int colIndex);                   // Sum column values
+MICAPI int micCSVCountWhere(micCSVFile *csv, int colIndex, const char *value);  // Count matching rows
+
+// Gzip/compressed file operations
+MICAPI unsigned char *micLoadGzipFile(const char *fileName, unsigned int *bytesRead);  // Read gzipped file
+MICAPI char *micLoadGzipFileText(const char *fileName);                         // Read gzipped text file
+MICAPI bool micSaveGzipFile(const char *fileName, void *data, unsigned int size);  // Save to gzip
+MICAPI bool micSaveGzipFileText(const char *fileName, const char *text);        // Save text to gzip
+MICAPI bool micConcatGzipFiles(const char **srcFiles, int srcCount, const char *dstFile);  // Concatenate gzipped files
+
+// AWK-like text processing
+MICAPI double micTextFieldSum(const char *text, int fieldIndex, char delimiter);  // Sum field values
+MICAPI char *micExtractField(const char *line, int fieldIndex, char delimiter);   // Extract field from line
+MICAPI char *micFilterLines(const char *text, int fieldIndex, const char *condition, char delimiter);  // Filter lines
+MICAPI int micCountLines(const char *text);                                      // Count lines in text
+MICAPI char *micHeadLines(const char *text, int n);                              // Get first n lines
+MICAPI char *micTailLines(const char *text, int n);                              // Get last n lines
+MICAPI char *micSortByField(const char *text, int fieldIndex, char delimiter, bool descending, bool numeric);  // Sort lines
+
+// Workflow context functions
+MICAPI void micWorkflowInit(micWorkflow *wf);                                    // Initialize workflow
+MICAPI void micWorkflowSetWorkDir(micWorkflow *wf, const char *dirPath);         // Set working directory
+MICAPI int micWorkflowLoadConfig(micWorkflow *wf, const char *configFile);       // Load config
+MICAPI int micWorkflowLoadSamples(micWorkflow *wf, const char *samplesFile);     // Load samples
+MICAPI char **micWorkflowExpand(micWorkflow *wf, const char *pattern, int *count);  // Expand pattern
+MICAPI const char *micWorkflowConfig(micWorkflow *wf, const char *key);          // Get config value
+MICAPI void micWorkflowFree(micWorkflow *wf);                                    // Free resources
+
+// Helper path functions
+MICAPI char *micContainerPath(const char *containerDir, const char *containerName);  // Build container path
+MICAPI char *micBuildPath(const char *workDir, const char *relativePath);        // Build output path
+MICAPI bool micEnsureOutputDir(const char *filePath);                            // Ensure directory exists for output file
 
 #ifdef __cplusplus
 }
@@ -3654,5 +3773,1641 @@ int micGetNumCores(void)
 }
 
 #endif  // MIC_NO_THREADS
+
+//----------------------------------------------------------------------------------
+// Bioinformatics Workflow Functions Implementation
+//----------------------------------------------------------------------------------
+
+// Configuration Management Functions
+
+// Load configuration from simple key=value file
+int micLoadConfig(micConfig *config, const char *fileName)
+{
+    if (config == NULL || fileName == NULL) return -1;
+    
+    config->count = 0;
+    
+    char *text = micLoadFileText(fileName);
+    if (text == NULL)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Failed to load config file: %s", fileName);
+        return -1;
+    }
+    
+    // Parse line by line
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    for (int i = 0; i < lineCount && config->count < MIC_MAX_CONFIG_ENTRIES; i++)
+    {
+        const char *line = lines[i];
+        
+        // Skip empty lines and comments
+        if (strlen(line) == 0 || line[0] == '#' || line[0] == ';') continue;
+        
+        // Find '=' separator
+        const char *eq = strchr(line, '=');
+        if (eq == NULL) continue;
+        
+        // Extract key and value
+        int keyLen = eq - line;
+        if (keyLen >= 255) continue;  // Leave room for null terminator
+        
+        strncpy(config->entries[config->count].key, line, keyLen);
+        config->entries[config->count].key[keyLen] = '\0';
+        
+        // Trim whitespace from key
+        int start = 0, end = keyLen - 1;
+        while (start < keyLen && (config->entries[config->count].key[start] == ' ' || 
+               config->entries[config->count].key[start] == '\t')) start++;
+        while (end > start && (config->entries[config->count].key[end] == ' ' || 
+               config->entries[config->count].key[end] == '\t')) end--;
+        
+        if (start > 0 || end < keyLen - 1)
+        {
+            memmove(config->entries[config->count].key, 
+                   config->entries[config->count].key + start, 
+                   end - start + 1);
+            config->entries[config->count].key[end - start + 1] = '\0';
+        }
+        
+        // Copy value
+        const char *value = eq + 1;
+        int valueLen = strlen(value);
+        if (valueLen >= 1024) valueLen = 1023;  // Limit to buffer size - 1
+        
+        strncpy(config->entries[config->count].value, value, valueLen);
+        config->entries[config->count].value[valueLen] = '\0';
+        
+        // Trim whitespace from value
+        int vlen = strlen(config->entries[config->count].value);
+        start = 0; end = vlen - 1;
+        while (start < vlen && (config->entries[config->count].value[start] == ' ' || 
+               config->entries[config->count].value[start] == '\t')) start++;
+        while (end > start && (config->entries[config->count].value[end] == ' ' || 
+               config->entries[config->count].value[end] == '\t' ||
+               config->entries[config->count].value[end] == '\r' ||
+               config->entries[config->count].value[end] == '\n')) end--;
+        
+        if (start > 0 || end < vlen - 1)
+        {
+            memmove(config->entries[config->count].value, 
+                   config->entries[config->count].value + start, 
+                   end - start + 1);
+            config->entries[config->count].value[end - start + 1] = '\0';
+        }
+        
+        config->count++;
+    }
+    
+    micUnloadFileText(text);
+    
+    micTraceLog(MIC_LOG_INFO, "Loaded %d config entries from %s", config->count, fileName);
+    return config->count;
+}
+
+// Load configuration from JSON file (simple parser)
+int micLoadConfigJSON(micConfig *config, const char *fileName)
+{
+    if (config == NULL || fileName == NULL) return -1;
+    
+    config->count = 0;
+    
+    char *text = micLoadFileText(fileName);
+    if (text == NULL)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Failed to load JSON config file: %s", fileName);
+        return -1;
+    }
+    
+    // Simple JSON parsing - look for "key": "value" pairs
+    char *ptr = text;
+    while (*ptr && config->count < MIC_MAX_CONFIG_ENTRIES)
+    {
+        // Find opening quote for key
+        char *keyStart = strchr(ptr, '"');
+        if (keyStart == NULL) break;
+        keyStart++;
+        
+        // Find closing quote for key
+        char *keyEnd = strchr(keyStart, '"');
+        if (keyEnd == NULL) break;
+        
+        // Extract key
+        int keyLen = keyEnd - keyStart;
+        if (keyLen >= 255) { ptr = keyEnd + 1; continue; }  // Leave room for null terminator
+        
+        strncpy(config->entries[config->count].key, keyStart, keyLen);
+        config->entries[config->count].key[keyLen] = '\0';
+        
+        // Find colon
+        ptr = strchr(keyEnd, ':');
+        if (ptr == NULL) break;
+        ptr++;
+        
+        // Skip whitespace
+        while (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r') ptr++;
+        
+        // Find value (string or other)
+        if (*ptr == '"')
+        {
+            // String value
+            ptr++;
+            char *valueStart = ptr;
+            char *valueEnd = strchr(valueStart, '"');
+            if (valueEnd == NULL) break;
+            
+            int valueLen = valueEnd - valueStart;
+            if (valueLen >= 1024) valueLen = 1023;
+            
+            strncpy(config->entries[config->count].value, valueStart, valueLen);
+            config->entries[config->count].value[valueLen] = '\0';
+            
+            ptr = valueEnd + 1;
+        }
+        else
+        {
+            // Number, boolean, etc
+            char *valueStart = ptr;
+            while (*ptr && *ptr != ',' && *ptr != '}' && *ptr != '\n') ptr++;
+            
+            int valueLen = ptr - valueStart;
+            if (valueLen >= 1024) valueLen = 1023;
+            
+            strncpy(config->entries[config->count].value, valueStart, valueLen);
+            config->entries[config->count].value[valueLen] = '\0';
+            
+            // Trim trailing whitespace
+            int i = valueLen - 1;
+            while (i >= 0 && (config->entries[config->count].value[i] == ' ' || 
+                   config->entries[config->count].value[i] == '\t' ||
+                   config->entries[config->count].value[i] == '\r')) 
+            {
+                config->entries[config->count].value[i] = '\0';
+                i--;
+            }
+        }
+        
+        config->count++;
+    }
+    
+    micUnloadFileText(text);
+    
+    micTraceLog(MIC_LOG_INFO, "Loaded %d config entries from JSON %s", config->count, fileName);
+    return config->count;
+}
+
+// Get configuration value by key
+const char *micConfigGet(micConfig *config, const char *key)
+{
+    if (config == NULL || key == NULL) return NULL;
+    
+    for (int i = 0; i < config->count; i++)
+    {
+        if (strcmp(config->entries[i].key, key) == 0)
+        {
+            return config->entries[i].value;
+        }
+    }
+    
+    return NULL;
+}
+
+// Get configuration value with default
+const char *micConfigGetDefault(micConfig *config, const char *key, const char *defaultValue)
+{
+    const char *value = micConfigGet(config, key);
+    return (value != NULL) ? value : defaultValue;
+}
+
+// Set configuration value
+void micConfigSet(micConfig *config, const char *key, const char *value)
+{
+    if (config == NULL || key == NULL || value == NULL) return;
+    
+    // Check if key already exists
+    for (int i = 0; i < config->count; i++)
+    {
+        if (strcmp(config->entries[i].key, key) == 0)
+        {
+            strncpy(config->entries[i].value, value, 1023);
+            config->entries[i].value[1023] = '\0';
+            return;
+        }
+    }
+    
+    // Add new entry if space available
+    if (config->count < MIC_MAX_CONFIG_ENTRIES)
+    {
+        strncpy(config->entries[config->count].key, key, 255);
+        config->entries[config->count].key[255] = '\0';
+        strncpy(config->entries[config->count].value, value, 1023);
+        config->entries[config->count].value[1023] = '\0';
+        config->count++;
+    }
+}
+
+// Free configuration memory (currently no dynamic allocation)
+void micConfigFree(micConfig *config)
+{
+    if (config == NULL) return;
+    config->count = 0;
+}
+
+// Sample List Management Functions
+
+// Load samples from JSON array
+int micLoadSamplesJSON(micSampleList *samples, const char *fileName)
+{
+    if (samples == NULL || fileName == NULL) return -1;
+    
+    samples->samples = NULL;
+    samples->count = 0;
+    
+    char *text = micLoadFileText(fileName);
+    if (text == NULL)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Failed to load samples JSON: %s", fileName);
+        return -1;
+    }
+    
+    // Simple JSON array parser - look for strings in array
+    char *ptr = text;
+    
+    // Find opening bracket
+    ptr = strchr(ptr, '[');
+    if (ptr == NULL)
+    {
+        micUnloadFileText(text);
+        return -1;
+    }
+    ptr++;
+    
+    // Allocate sample array
+    samples->samples = (char **)MIC_MALLOC(MIC_MAX_SAMPLES * sizeof(char *));
+    if (samples->samples == NULL)
+    {
+        micUnloadFileText(text);
+        return -1;
+    }
+    
+    // Parse samples
+    while (*ptr && samples->count < MIC_MAX_SAMPLES)
+    {
+        // Skip whitespace
+        while (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r' || *ptr == ',') ptr++;
+        
+        if (*ptr == ']') break;  // End of array
+        
+        // Find opening quote
+        if (*ptr != '"') { ptr++; continue; }
+        ptr++;
+        
+        char *sampleStart = ptr;
+        char *sampleEnd = strchr(sampleStart, '"');
+        if (sampleEnd == NULL) break;
+        
+        // Allocate and copy sample name
+        int sampleLen = sampleEnd - sampleStart;
+        samples->samples[samples->count] = (char *)MIC_MALLOC(sampleLen + 1);
+        if (samples->samples[samples->count] == NULL) break;
+        
+        strncpy(samples->samples[samples->count], sampleStart, sampleLen);
+        samples->samples[samples->count][sampleLen] = '\0';
+        
+        samples->count++;
+        ptr = sampleEnd + 1;
+    }
+    
+    micUnloadFileText(text);
+    
+    micTraceLog(MIC_LOG_INFO, "Loaded %d samples from JSON %s", samples->count, fileName);
+    return samples->count;
+}
+
+// Load samples from text file (one per line)
+int micLoadSamplesList(micSampleList *samples, const char *fileName)
+{
+    if (samples == NULL || fileName == NULL) return -1;
+    
+    samples->samples = NULL;
+    samples->count = 0;
+    
+    char *text = micLoadFileText(fileName);
+    if (text == NULL)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Failed to load samples list: %s", fileName);
+        return -1;
+    }
+    
+    // Split by lines
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    if (lineCount == 0)
+    {
+        micUnloadFileText(text);
+        return 0;
+    }
+    
+    // Allocate sample array
+    samples->samples = (char **)MIC_MALLOC(MIC_MAX_SAMPLES * sizeof(char *));
+    if (samples->samples == NULL)
+    {
+        micUnloadFileText(text);
+        return -1;
+    }
+    
+    // Copy non-empty lines as samples
+    for (int i = 0; i < lineCount && samples->count < MIC_MAX_SAMPLES; i++)
+    {
+        const char *line = lines[i];
+        
+        // Skip empty lines and comments
+        if (strlen(line) == 0 || line[0] == '#') continue;
+        
+        // Allocate and copy sample
+        int len = strlen(line);
+        
+        // Remove trailing whitespace
+        while (len > 0 && (line[len-1] == ' ' || line[len-1] == '\t' || 
+               line[len-1] == '\r' || line[len-1] == '\n'))
+        {
+            len--;
+        }
+        
+        if (len == 0) continue;
+        
+        samples->samples[samples->count] = (char *)MIC_MALLOC(len + 1);
+        if (samples->samples[samples->count] == NULL) break;
+        
+        strncpy(samples->samples[samples->count], line, len);
+        samples->samples[samples->count][len] = '\0';
+        
+        samples->count++;
+    }
+    
+    micUnloadFileText(text);
+    
+    micTraceLog(MIC_LOG_INFO, "Loaded %d samples from list %s", samples->count, fileName);
+    return samples->count;
+}
+
+// Create sample list from array
+int micCreateSampleList(micSampleList *samples, const char **sampleNames, int count)
+{
+    if (samples == NULL || sampleNames == NULL || count <= 0) return -1;
+    
+    samples->samples = NULL;
+    samples->count = 0;
+    
+    if (count > MIC_MAX_SAMPLES) count = MIC_MAX_SAMPLES;
+    
+    samples->samples = (char **)MIC_MALLOC(count * sizeof(char *));
+    if (samples->samples == NULL) return -1;
+    
+    for (int i = 0; i < count; i++)
+    {
+        int len = strlen(sampleNames[i]);
+        samples->samples[i] = (char *)MIC_MALLOC(len + 1);
+        if (samples->samples[i] == NULL)
+        {
+            // Free already allocated samples
+            for (int j = 0; j < i; j++) MIC_FREE(samples->samples[j]);
+            MIC_FREE(samples->samples);
+            samples->samples = NULL;
+            return -1;
+        }
+        strcpy(samples->samples[i], sampleNames[i]);
+        samples->count++;
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Created sample list with %d samples", samples->count);
+    return samples->count;
+}
+
+// Get sample by index
+const char *micGetSample(micSampleList *samples, int index)
+{
+    if (samples == NULL || index < 0 || index >= samples->count) return NULL;
+    return samples->samples[index];
+}
+
+// Free sample list
+void micFreeSampleList(micSampleList *samples)
+{
+    if (samples == NULL) return;
+    
+    if (samples->samples != NULL)
+    {
+        for (int i = 0; i < samples->count; i++)
+        {
+            if (samples->samples[i] != NULL)
+            {
+                MIC_FREE(samples->samples[i]);
+            }
+        }
+        MIC_FREE(samples->samples);
+        samples->samples = NULL;
+    }
+    
+    samples->count = 0;
+}
+
+// File Pattern Expansion Functions
+
+// Expand pattern with sample list (e.g., "tags/{sample}.csv")
+char **micExpand(const char *pattern, micSampleList *samples, int *count)
+{
+    if (pattern == NULL || samples == NULL || count == NULL) return NULL;
+    
+    *count = 0;
+    
+    if (samples->count == 0) return NULL;
+    
+    // Allocate array for expanded filenames
+    char **files = (char **)MIC_MALLOC(samples->count * sizeof(char *));
+    if (files == NULL) return NULL;
+    
+    // Expand pattern for each sample
+    for (int i = 0; i < samples->count; i++)
+    {
+        const char *sample = samples->samples[i];
+        
+        // Replace {sample} with actual sample name
+        char *expanded = micReplaceWildcard(pattern, "sample", sample);
+        
+        if (expanded != NULL)
+        {
+            files[*count] = expanded;
+            (*count)++;
+        }
+    }
+    
+    micTraceLog(MIC_LOG_DEBUG, "Expanded pattern '%s' to %d files", pattern, *count);
+    return files;
+}
+
+// Expand pattern with key-value map
+char **micExpandWithMap(const char *pattern, const char **keys, const char **values, int mapSize, int *count)
+{
+    if (pattern == NULL || keys == NULL || values == NULL || count == NULL || mapSize <= 0) return NULL;
+    
+    *count = 0;
+    
+    // Check pattern length
+    int patternLen = strlen(pattern);
+    if (patternLen >= MIC_MAX_PATTERN_LENGTH) return NULL;
+    
+    // For single expansion with multiple replacements
+    char *result = (char *)MIC_MALLOC(MIC_MAX_PATTERN_LENGTH);
+    if (result == NULL) return NULL;
+    
+    strncpy(result, pattern, MIC_MAX_PATTERN_LENGTH - 1);
+    result[MIC_MAX_PATTERN_LENGTH - 1] = '\0';
+    
+    // Replace each wildcard
+    for (int i = 0; i < mapSize; i++)
+    {
+        char *temp = micReplaceWildcard(result, keys[i], values[i]);
+        if (temp != NULL)
+        {
+            int tempLen = strlen(temp);
+            if (tempLen < MIC_MAX_PATTERN_LENGTH)
+            {
+                strncpy(result, temp, MIC_MAX_PATTERN_LENGTH - 1);
+                result[MIC_MAX_PATTERN_LENGTH - 1] = '\0';
+            }
+            MIC_FREE(temp);
+        }
+    }
+    
+    // Allocate result array with single element
+    char **files = (char **)MIC_MALLOC(sizeof(char *));
+    if (files == NULL)
+    {
+        MIC_FREE(result);
+        return NULL;
+    }
+    
+    files[0] = result;
+    *count = 1;
+    
+    return files;
+}
+
+// Free expanded file list
+void micFreeExpandedFiles(char **files, int count)
+{
+    if (files == NULL) return;
+    
+    for (int i = 0; i < count; i++)
+    {
+        if (files[i] != NULL)
+        {
+            MIC_FREE(files[i]);
+        }
+    }
+    MIC_FREE(files);
+}
+
+// Check if all files exist
+bool micAllFilesExist(char **files, int count)
+{
+    if (files == NULL || count <= 0) return false;
+    
+    for (int i = 0; i < count; i++)
+    {
+        if (!micIsFileAvailable(files[i]))
+        {
+            micTraceLog(MIC_LOG_DEBUG, "File does not exist: %s", files[i]);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Wait for all files with timeout
+bool micWaitForAllFiles(char **files, int count, int timeoutMs)
+{
+    if (files == NULL || count <= 0) return false;
+    
+    return micWaitForFiles((const char **)files, count, timeoutMs);
+}
+
+// Wildcard/Pattern Functions
+
+// Extract wildcard value from filename
+char *micExtractWildcard(const char *pattern, const char *fileName, const char *wildcardName)
+{
+    if (pattern == NULL || fileName == NULL || wildcardName == NULL) return NULL;
+    
+    // Build wildcard pattern: {wildcardName}
+    char wildcard[128];
+    snprintf(wildcard, sizeof(wildcard), "{%s}", wildcardName);
+    
+    // Find wildcard in pattern
+    const char *wildcardPos = strstr(pattern, wildcard);
+    if (wildcardPos == NULL) return NULL;
+    
+    // Calculate prefix and suffix lengths
+    int prefixLen = wildcardPos - pattern;
+    int suffixLen = strlen(pattern) - prefixLen - strlen(wildcard);
+    
+    // Check if filename matches prefix and suffix
+    if (strncmp(fileName, pattern, prefixLen) != 0) return NULL;
+    
+    int fileNameLen = strlen(fileName);
+    if (suffixLen > 0)
+    {
+        if (fileNameLen < prefixLen + suffixLen) return NULL;
+        if (strcmp(fileName + fileNameLen - suffixLen, pattern + prefixLen + strlen(wildcard)) != 0)
+            return NULL;
+    }
+    
+    // Extract wildcard value
+    int valueLen = fileNameLen - prefixLen - suffixLen;
+    if (valueLen <= 0) return NULL;
+    
+    char *value = (char *)MIC_MALLOC(valueLen + 1);
+    if (value == NULL) return NULL;
+    
+    strncpy(value, fileName + prefixLen, valueLen);
+    value[valueLen] = '\0';
+    
+    return value;
+}
+
+// Replace wildcard in pattern
+char *micReplaceWildcard(const char *pattern, const char *wildcardName, const char *value)
+{
+    if (pattern == NULL || wildcardName == NULL || value == NULL) return NULL;
+    
+    // Build wildcard pattern: {wildcardName}
+    char wildcard[128];
+    snprintf(wildcard, sizeof(wildcard), "{%s}", wildcardName);
+    
+    // Find wildcard in pattern
+    const char *wildcardPos = strstr(pattern, wildcard);
+    if (wildcardPos == NULL)
+    {
+        // No wildcard found, return copy of pattern
+        char *result = (char *)MIC_MALLOC(strlen(pattern) + 1);
+        if (result != NULL) strcpy(result, pattern);
+        return result;
+    }
+    
+    // Calculate lengths
+    int prefixLen = wildcardPos - pattern;
+    int suffixLen = strlen(pattern) - prefixLen - strlen(wildcard);
+    int resultLen = prefixLen + strlen(value) + suffixLen;
+    
+    // Allocate result
+    char *result = (char *)MIC_MALLOC(resultLen + 1);
+    if (result == NULL) return NULL;
+    
+    // Build result
+    strncpy(result, pattern, prefixLen);
+    strcpy(result + prefixLen, value);
+    strcpy(result + prefixLen + strlen(value), pattern + prefixLen + strlen(wildcard));
+    
+    return result;
+}
+
+// Get all wildcard names from pattern
+char **micGetWildcards(const char *pattern, int *count)
+{
+    if (pattern == NULL || count == NULL) return NULL;
+    
+    *count = 0;
+    
+    // Allocate array for wildcards
+    char **wildcards = (char **)MIC_MALLOC(16 * sizeof(char *));
+    if (wildcards == NULL) return NULL;
+    
+    // Find all {wildcard} patterns
+    const char *ptr = pattern;
+    while ((ptr = strchr(ptr, '{')) != NULL)
+    {
+        ptr++;  // Skip '{'
+        const char *end = strchr(ptr, '}');
+        if (end == NULL) break;
+        
+        int len = end - ptr;
+        if (len > 0 && *count < 16)
+        {
+            wildcards[*count] = (char *)MIC_MALLOC(len + 1);
+            if (wildcards[*count] != NULL)
+            {
+                strncpy(wildcards[*count], ptr, len);
+                wildcards[*count][len] = '\0';
+                (*count)++;
+            }
+        }
+        
+        ptr = end + 1;
+    }
+    
+    return wildcards;
+}
+
+// CSV File Operations
+
+// Load CSV file
+micCSVFile *micLoadCSV(const char *fileName, char delimiter, bool hasHeader)
+{
+    if (fileName == NULL) return NULL;
+    
+    char *text = micLoadFileText(fileName);
+    if (text == NULL)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Failed to load CSV file: %s", fileName);
+        return NULL;
+    }
+    
+    // Allocate CSV structure
+    micCSVFile *csv = (micCSVFile *)MIC_CALLOC(1, sizeof(micCSVFile));
+    if (csv == NULL)
+    {
+        micUnloadFileText(text);
+        return NULL;
+    }
+    
+    csv->delimiter = delimiter;
+    
+    // Split into lines
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    if (lineCount == 0)
+    {
+        micUnloadFileText(text);
+        MIC_FREE(csv);
+        return NULL;
+    }
+    
+    int startRow = 0;
+    
+    // Parse header if present
+    if (hasHeader && lineCount > 0)
+    {
+        int fieldCount = 0;
+        const char **fields = micStringSplit(lines[0], delimiter, &fieldCount);
+        
+        csv->headerCount = fieldCount;
+        csv->headers = (char **)MIC_MALLOC(fieldCount * sizeof(char *));
+        
+        if (csv->headers != NULL)
+        {
+            for (int i = 0; i < fieldCount; i++)
+            {
+                int len = strlen(fields[i]);
+                
+                // Trim whitespace and quotes
+                const char *start = fields[i];
+                const char *end = fields[i] + len - 1;
+                
+                while (*start == ' ' || *start == '\t' || *start == '"') start++;
+                while (end > start && (*end == ' ' || *end == '\t' || *end == '"' || 
+                       *end == '\r' || *end == '\n')) end--;
+                
+                int trimLen = end - start + 1;
+                csv->headers[i] = (char *)MIC_MALLOC(trimLen + 1);
+                if (csv->headers[i] != NULL)
+                {
+                    strncpy(csv->headers[i], start, trimLen);
+                    csv->headers[i][trimLen] = '\0';
+                }
+            }
+        }
+        
+        startRow = 1;
+    }
+    
+    // Parse data rows
+    int maxRows = lineCount - startRow;
+    if (maxRows > MIC_MAX_CSV_ROWS) maxRows = MIC_MAX_CSV_ROWS;
+    
+    csv->rows = (micCSVRow *)MIC_MALLOC(maxRows * sizeof(micCSVRow));
+    if (csv->rows == NULL)
+    {
+        micUnloadFileText(text);
+        micFreeCSV(csv);
+        return NULL;
+    }
+    
+    for (int i = startRow; i < lineCount && csv->rowCount < maxRows; i++)
+    {
+        const char *line = lines[i];
+        
+        // Skip empty lines
+        if (strlen(line) == 0) continue;
+        
+        int fieldCount = 0;
+        const char **fields = micStringSplit(line, delimiter, &fieldCount);
+        
+        if (fieldCount > 0)
+        {
+            csv->rows[csv->rowCount].fieldCount = fieldCount;
+            csv->rows[csv->rowCount].fields = (char **)MIC_MALLOC(fieldCount * sizeof(char *));
+            
+            if (csv->rows[csv->rowCount].fields != NULL)
+            {
+                for (int j = 0; j < fieldCount; j++)
+                {
+                    int len = strlen(fields[j]);
+                    
+                    // Trim whitespace and quotes
+                    const char *start = fields[j];
+                    const char *end = fields[j] + len;
+                    
+                    // Move start forward past whitespace and quotes
+                    while (start < end && (*start == ' ' || *start == '\t' || *start == '"')) start++;
+                    
+                    // Move end backward to last non-whitespace character
+                    end--;  // Move to last character
+                    while (end >= start && (*end == ' ' || *end == '\t' || *end == '"' || 
+                           *end == '\r' || *end == '\n')) end--;
+                    
+                    int trimLen = (end >= start) ? (end - start + 1) : 0;
+                    
+                    csv->rows[csv->rowCount].fields[j] = (char *)MIC_MALLOC(trimLen + 1);
+                    if (csv->rows[csv->rowCount].fields[j] != NULL)
+                    {
+                        if (trimLen > 0)
+                        {
+                            strncpy(csv->rows[csv->rowCount].fields[j], start, trimLen);
+                        }
+                        csv->rows[csv->rowCount].fields[j][trimLen] = '\0';
+                    }
+                }
+                csv->rowCount++;
+            }
+        }
+    }
+    
+    micUnloadFileText(text);
+    
+    micTraceLog(MIC_LOG_INFO, "Loaded CSV file %s: %d rows, %d columns", 
+                fileName, csv->rowCount, csv->headerCount);
+    
+    return csv;
+}
+
+// Save CSV file
+bool micSaveCSV(const char *fileName, micCSVFile *csv)
+{
+    if (fileName == NULL || csv == NULL) return false;
+    
+    FILE *file = fopen(fileName, "w");
+    if (file == NULL)
+    {
+        micTraceLog(MIC_LOG_ERROR, "Failed to open CSV file for writing: %s", fileName);
+        return false;
+    }
+    
+    // Write headers if present
+    if (csv->headers != NULL && csv->headerCount > 0)
+    {
+        for (int i = 0; i < csv->headerCount; i++)
+        {
+            fprintf(file, "%s", csv->headers[i]);
+            if (i < csv->headerCount - 1) fprintf(file, "%c", csv->delimiter);
+        }
+        fprintf(file, "\n");
+    }
+    
+    // Write rows
+    for (int i = 0; i < csv->rowCount; i++)
+    {
+        for (int j = 0; j < csv->rows[i].fieldCount; j++)
+        {
+            fprintf(file, "%s", csv->rows[i].fields[j]);
+            if (j < csv->rows[i].fieldCount - 1) fprintf(file, "%c", csv->delimiter);
+        }
+        fprintf(file, "\n");
+    }
+    
+    fclose(file);
+    
+    micTraceLog(MIC_LOG_INFO, "Saved CSV file: %s", fileName);
+    return true;
+}
+
+// Get CSV value by row and column indices
+const char *micCSVGetValue(micCSVFile *csv, int row, int col)
+{
+    if (csv == NULL || row < 0 || row >= csv->rowCount) return NULL;
+    if (col < 0 || col >= csv->rows[row].fieldCount) return NULL;
+    
+    return csv->rows[row].fields[col];
+}
+
+// Get CSV value by row index and header name
+const char *micCSVGetValueByName(micCSVFile *csv, int row, const char *headerName)
+{
+    if (csv == NULL || headerName == NULL || row < 0 || row >= csv->rowCount) return NULL;
+    
+    // Find column index by header name
+    int col = -1;
+    for (int i = 0; i < csv->headerCount; i++)
+    {
+        if (strcmp(csv->headers[i], headerName) == 0)
+        {
+            col = i;
+            break;
+        }
+    }
+    
+    if (col < 0) return NULL;
+    
+    return micCSVGetValue(csv, row, col);
+}
+
+// Add row to CSV
+bool micCSVAddRow(micCSVFile *csv, const char **fields, int fieldCount)
+{
+    if (csv == NULL || fields == NULL || fieldCount <= 0) return false;
+    if (csv->rowCount >= MIC_MAX_CSV_ROWS) return false;
+    
+    // Reallocate rows if needed
+    if (csv->rows == NULL)
+    {
+        csv->rows = (micCSVRow *)MIC_MALLOC(MIC_MAX_CSV_ROWS * sizeof(micCSVRow));
+        if (csv->rows == NULL) return false;
+    }
+    
+    csv->rows[csv->rowCount].fieldCount = fieldCount;
+    csv->rows[csv->rowCount].fields = (char **)MIC_MALLOC(fieldCount * sizeof(char *));
+    
+    if (csv->rows[csv->rowCount].fields == NULL) return false;
+    
+    for (int i = 0; i < fieldCount; i++)
+    {
+        int len = strlen(fields[i]);
+        csv->rows[csv->rowCount].fields[i] = (char *)MIC_MALLOC(len + 1);
+        if (csv->rows[csv->rowCount].fields[i] != NULL)
+        {
+            strcpy(csv->rows[csv->rowCount].fields[i], fields[i]);
+        }
+    }
+    
+    csv->rowCount++;
+    return true;
+}
+
+// Create empty CSV with headers
+micCSVFile *micCSVCreate(const char **headers, int headerCount, char delimiter)
+{
+    micCSVFile *csv = (micCSVFile *)MIC_CALLOC(1, sizeof(micCSVFile));
+    if (csv == NULL) return NULL;
+    
+    csv->delimiter = delimiter;
+    csv->headerCount = headerCount;
+    
+    if (headerCount > 0 && headers != NULL)
+    {
+        csv->headers = (char **)MIC_MALLOC(headerCount * sizeof(char *));
+        if (csv->headers != NULL)
+        {
+            for (int i = 0; i < headerCount; i++)
+            {
+                int len = strlen(headers[i]);
+                csv->headers[i] = (char *)MIC_MALLOC(len + 1);
+                if (csv->headers[i] != NULL)
+                {
+                    strcpy(csv->headers[i], headers[i]);
+                }
+            }
+        }
+    }
+    
+    return csv;
+}
+
+// Free CSV file
+void micFreeCSV(micCSVFile *csv)
+{
+    if (csv == NULL) return;
+    
+    // Free headers
+    if (csv->headers != NULL)
+    {
+        for (int i = 0; i < csv->headerCount; i++)
+        {
+            if (csv->headers[i] != NULL) MIC_FREE(csv->headers[i]);
+        }
+        MIC_FREE(csv->headers);
+    }
+    
+    // Free rows
+    if (csv->rows != NULL)
+    {
+        for (int i = 0; i < csv->rowCount; i++)
+        {
+            if (csv->rows[i].fields != NULL)
+            {
+                for (int j = 0; j < csv->rows[i].fieldCount; j++)
+                {
+                    if (csv->rows[i].fields[j] != NULL) MIC_FREE(csv->rows[i].fields[j]);
+                }
+                MIC_FREE(csv->rows[i].fields);
+            }
+        }
+        MIC_FREE(csv->rows);
+    }
+    
+    MIC_FREE(csv);
+}
+
+// Sum column values
+double micCSVSumColumn(micCSVFile *csv, int colIndex)
+{
+    if (csv == NULL || colIndex < 0) return 0.0;
+    
+    double sum = 0.0;
+    for (int i = 0; i < csv->rowCount; i++)
+    {
+        if (colIndex < csv->rows[i].fieldCount)
+        {
+            sum += atof(csv->rows[i].fields[colIndex]);
+        }
+    }
+    
+    return sum;
+}
+
+// Count rows where column matches value
+int micCSVCountWhere(micCSVFile *csv, int colIndex, const char *value)
+{
+    if (csv == NULL || value == NULL || colIndex < 0) return 0;
+    
+    int count = 0;
+    for (int i = 0; i < csv->rowCount; i++)
+    {
+        if (colIndex < csv->rows[i].fieldCount)
+        {
+            if (strcmp(csv->rows[i].fields[colIndex], value) == 0)
+            {
+                count++;
+            }
+        }
+    }
+    
+    return count;
+}
+
+// Gzip/Compressed File Operations
+// Note: These require zlib. Provide simple implementations that check for zlib availability
+
+#if defined(SUPPORT_COMPRESSION_API)
+
+// Load gzipped file to memory
+unsigned char *micLoadGzipFile(const char *fileName, unsigned int *bytesRead)
+{
+    if (fileName == NULL || bytesRead == NULL) return NULL;
+    
+    // Use existing decompression if available
+    unsigned char *compData = micLoadFileData(fileName, bytesRead);
+    if (compData == NULL) return NULL;
+    
+    int dataLength = 0;
+    unsigned char *data = micDecompressData(compData, *bytesRead, &dataLength);
+    
+    micUnloadFileData(compData);
+    
+    if (data != NULL) *bytesRead = dataLength;
+    
+    return data;
+}
+
+// Load gzipped text file
+char *micLoadGzipFileText(const char *fileName)
+{
+    unsigned int bytesRead = 0;
+    unsigned char *data = micLoadGzipFile(fileName, &bytesRead);
+    
+    if (data == NULL) return NULL;
+    
+    // Ensure null termination
+    char *text = (char *)MIC_REALLOC(data, bytesRead + 1);
+    if (text != NULL)
+    {
+        text[bytesRead] = '\0';
+    }
+    
+    return text;
+}
+
+// Save data to gzipped file
+bool micSaveGzipFile(const char *fileName, void *data, unsigned int size)
+{
+    if (fileName == NULL || data == NULL || size == 0) return false;
+    
+    int compSize = 0;
+    unsigned char *compData = micCompressData((unsigned char *)data, size, &compSize);
+    
+    if (compData == NULL) return false;
+    
+    bool result = micSaveFileData(fileName, compData, compSize);
+    
+    MIC_FREE(compData);
+    
+    return result;
+}
+
+// Save text to gzipped file
+bool micSaveGzipFileText(const char *fileName, const char *text)
+{
+    if (fileName == NULL || text == NULL) return false;
+    
+    return micSaveGzipFile(fileName, (void *)text, strlen(text));
+}
+
+// Concatenate gzipped files
+bool micConcatGzipFiles(const char **srcFiles, int srcCount, const char *dstFile)
+{
+    if (srcFiles == NULL || srcCount <= 0 || dstFile == NULL) return false;
+    
+    // Load and decompress all files
+    unsigned char **dataBlocks = (unsigned char **)MIC_MALLOC(srcCount * sizeof(unsigned char *));
+    unsigned int *sizes = (unsigned int *)MIC_MALLOC(srcCount * sizeof(unsigned int));
+    
+    if (dataBlocks == NULL || sizes == NULL)
+    {
+        if (dataBlocks) MIC_FREE(dataBlocks);
+        if (sizes) MIC_FREE(sizes);
+        return false;
+    }
+    
+    unsigned int totalSize = 0;
+    for (int i = 0; i < srcCount; i++)
+    {
+        dataBlocks[i] = micLoadGzipFile(srcFiles[i], &sizes[i]);
+        if (dataBlocks[i] != NULL)
+        {
+            totalSize += sizes[i];
+        }
+    }
+    
+    // Concatenate
+    unsigned char *combined = (unsigned char *)MIC_MALLOC(totalSize);
+    if (combined == NULL)
+    {
+        for (int i = 0; i < srcCount; i++)
+        {
+            if (dataBlocks[i]) MIC_FREE(dataBlocks[i]);
+        }
+        MIC_FREE(dataBlocks);
+        MIC_FREE(sizes);
+        return false;
+    }
+    
+    unsigned int offset = 0;
+    for (int i = 0; i < srcCount; i++)
+    {
+        if (dataBlocks[i] != NULL)
+        {
+            memcpy(combined + offset, dataBlocks[i], sizes[i]);
+            offset += sizes[i];
+            MIC_FREE(dataBlocks[i]);
+        }
+    }
+    
+    // Compress and save
+    bool result = micSaveGzipFile(dstFile, combined, totalSize);
+    
+    MIC_FREE(combined);
+    MIC_FREE(dataBlocks);
+    MIC_FREE(sizes);
+    
+    return result;
+}
+
+#else
+
+// Stub implementations when compression not available
+unsigned char *micLoadGzipFile(const char *fileName, unsigned int *bytesRead)
+{
+    micTraceLog(MIC_LOG_WARNING, "Gzip support not available - compression library not linked");
+    return NULL;
+}
+
+char *micLoadGzipFileText(const char *fileName)
+{
+    micTraceLog(MIC_LOG_WARNING, "Gzip support not available - compression library not linked");
+    return NULL;
+}
+
+bool micSaveGzipFile(const char *fileName, void *data, unsigned int size)
+{
+    micTraceLog(MIC_LOG_WARNING, "Gzip support not available - compression library not linked");
+    return false;
+}
+
+bool micSaveGzipFileText(const char *fileName, const char *text)
+{
+    micTraceLog(MIC_LOG_WARNING, "Gzip support not available - compression library not linked");
+    return false;
+}
+
+bool micConcatGzipFiles(const char **srcFiles, int srcCount, const char *dstFile)
+{
+    micTraceLog(MIC_LOG_WARNING, "Gzip support not available - compression library not linked");
+    return false;
+}
+
+#endif  // SUPPORT_COMPRESSION_API
+
+// AWK-like Text Processing Functions
+
+// Sum values in a specific field across all lines
+double micTextFieldSum(const char *text, int fieldIndex, char delimiter)
+{
+    if (text == NULL || fieldIndex < 0) return 0.0;
+    
+    double sum = 0.0;
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    for (int i = 0; i < lineCount; i++)
+    {
+        if (strlen(lines[i]) == 0) continue;
+        
+        int fieldCount = 0;
+        const char **fields = micStringSplit(lines[i], delimiter, &fieldCount);
+        
+        if (fieldIndex < fieldCount)
+        {
+            sum += atof(fields[fieldIndex]);
+        }
+    }
+    
+    return sum;
+}
+
+// Extract specific field from a line
+char *micExtractField(const char *line, int fieldIndex, char delimiter)
+{
+    if (line == NULL || fieldIndex < 0) return NULL;
+    
+    int fieldCount = 0;
+    const char **fields = micStringSplit(line, delimiter, &fieldCount);
+    
+    if (fieldIndex >= fieldCount) return NULL;
+    
+    // Allocate and copy field
+    int len = strlen(fields[fieldIndex]);
+    char *result = (char *)MIC_MALLOC(len + 1);
+    if (result != NULL)
+    {
+        strcpy(result, fields[fieldIndex]);
+    }
+    
+    return result;
+}
+
+// Filter lines based on field condition
+char *micFilterLines(const char *text, int fieldIndex, const char *condition, char delimiter)
+{
+    if (text == NULL || condition == NULL || fieldIndex < 0) return NULL;
+    
+    // Allocate result buffer
+    int textLen = strlen(text);
+    char *result = (char *)MIC_MALLOC(textLen + 1);
+    if (result == NULL) return NULL;
+    
+    result[0] = '\0';
+    int resultLen = 0;
+    
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    for (int i = 0; i < lineCount; i++)
+    {
+        if (strlen(lines[i]) == 0) continue;
+        
+        int fieldCount = 0;
+        const char **fields = micStringSplit(lines[i], delimiter, &fieldCount);
+        
+        if (fieldIndex < fieldCount)
+        {
+            // Simple condition check: equals
+            if (strcmp(fields[fieldIndex], condition) == 0)
+            {
+                int lineLen = strlen(lines[i]);
+                if (resultLen + lineLen + 2 <= textLen)
+                {
+                    strcpy(result + resultLen, lines[i]);
+                    resultLen += lineLen;
+                    result[resultLen++] = '\n';
+                    result[resultLen] = '\0';
+                }
+            }
+        }
+    }
+    
+    return result;
+}
+
+// Count lines in text
+int micCountLines(const char *text)
+{
+    if (text == NULL) return 0;
+    
+    int count = 0;
+    const char *ptr = text;
+    
+    while (*ptr)
+    {
+        if (*ptr == '\n') count++;
+        ptr++;
+    }
+    
+    // Count last line if it doesn't end with newline
+    if (ptr > text && *(ptr - 1) != '\n') count++;
+    
+    return count;
+}
+
+// Get first n lines
+char *micHeadLines(const char *text, int n)
+{
+    if (text == NULL || n <= 0) return NULL;
+    
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    if (n > lineCount) n = lineCount;
+    
+    // Calculate total length needed
+    int totalLen = 0;
+    for (int i = 0; i < n; i++)
+    {
+        totalLen += strlen(lines[i]) + 1;  // +1 for newline
+    }
+    
+    char *result = (char *)MIC_MALLOC(totalLen + 1);
+    if (result == NULL) return NULL;
+    
+    result[0] = '\0';
+    int offset = 0;
+    
+    for (int i = 0; i < n; i++)
+    {
+        int len = strlen(lines[i]);
+        strcpy(result + offset, lines[i]);
+        offset += len;
+        result[offset++] = '\n';
+    }
+    result[offset] = '\0';
+    
+    return result;
+}
+
+// Get last n lines
+char *micTailLines(const char *text, int n)
+{
+    if (text == NULL || n <= 0) return NULL;
+    
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    int start = (lineCount > n) ? (lineCount - n) : 0;
+    int count = lineCount - start;
+    
+    // Calculate total length needed
+    int totalLen = 0;
+    for (int i = start; i < lineCount; i++)
+    {
+        totalLen += strlen(lines[i]) + 1;  // +1 for newline
+    }
+    
+    char *result = (char *)MIC_MALLOC(totalLen + 1);
+    if (result == NULL) return NULL;
+    
+    result[0] = '\0';
+    int offset = 0;
+    
+    for (int i = start; i < lineCount; i++)
+    {
+        int len = strlen(lines[i]);
+        strcpy(result + offset, lines[i]);
+        offset += len;
+        result[offset++] = '\n';
+    }
+    result[offset] = '\0';
+    
+    return result;
+}
+
+// Sort lines by field
+// WARNING: This uses bubble sort with O(n²) complexity. 
+// For large datasets (>1000 lines), this may be slow.
+// Consider limiting line count or using qsort for production use.
+char *micSortByField(const char *text, int fieldIndex, char delimiter, bool descending, bool numeric)
+{
+    if (text == NULL || fieldIndex < 0) return NULL;
+    
+    int lineCount = 0;
+    const char **lines = micStringSplit(text, '\n', &lineCount);
+    
+    if (lineCount == 0) return NULL;
+    
+    // Limit sorting to reasonable size for bubble sort
+    if (lineCount > 10000)
+    {
+        micTraceLog(MIC_LOG_WARNING, "Sorting %d lines may be slow with bubble sort", lineCount);
+    }
+    
+    // Simple bubble sort (acceptable for small-medium datasets)
+    // For production with large datasets, replace with qsort and custom comparator
+    const char **sortedLines = (const char **)MIC_MALLOC(lineCount * sizeof(char *));
+    if (sortedLines == NULL) return NULL;
+    
+    for (int i = 0; i < lineCount; i++)
+    {
+        sortedLines[i] = lines[i];
+    }
+    
+    // Bubble sort
+    for (int i = 0; i < lineCount - 1; i++)
+    {
+        for (int j = 0; j < lineCount - i - 1; j++)
+        {
+            // Extract fields
+            char *field1 = micExtractField(sortedLines[j], fieldIndex, delimiter);
+            char *field2 = micExtractField(sortedLines[j + 1], fieldIndex, delimiter);
+            
+            if (field1 == NULL || field2 == NULL)
+            {
+                if (field1) MIC_FREE(field1);
+                if (field2) MIC_FREE(field2);
+                continue;
+            }
+            
+            bool swap = false;
+            if (numeric)
+            {
+                double val1 = atof(field1);
+                double val2 = atof(field2);
+                swap = descending ? (val1 < val2) : (val1 > val2);
+            }
+            else
+            {
+                int cmp = strcmp(field1, field2);
+                swap = descending ? (cmp < 0) : (cmp > 0);
+            }
+            
+            if (swap)
+            {
+                const char *temp = sortedLines[j];
+                sortedLines[j] = sortedLines[j + 1];
+                sortedLines[j + 1] = temp;
+            }
+            
+            MIC_FREE(field1);
+            MIC_FREE(field2);
+        }
+    }
+    
+    // Build result string
+    int totalLen = 0;
+    for (int i = 0; i < lineCount; i++)
+    {
+        totalLen += strlen(sortedLines[i]) + 1;
+    }
+    
+    char *result = (char *)MIC_MALLOC(totalLen + 1);
+    if (result != NULL)
+    {
+        result[0] = '\0';
+        int offset = 0;
+        
+        for (int i = 0; i < lineCount; i++)
+        {
+            int len = strlen(sortedLines[i]);
+            strcpy(result + offset, sortedLines[i]);
+            offset += len;
+            result[offset++] = '\n';
+        }
+        result[offset] = '\0';
+    }
+    
+    MIC_FREE(sortedLines);
+    
+    return result;
+}
+
+// Workflow Context Functions
+
+// Initialize workflow
+void micWorkflowInit(micWorkflow *wf)
+{
+    if (wf == NULL) return;
+    
+    wf->config.count = 0;
+    wf->samples.samples = NULL;
+    wf->samples.count = 0;
+    wf->workDir[0] = '\0';
+    wf->expandedFiles = NULL;
+    wf->expandedCount = 0;
+    
+    micTraceLog(MIC_LOG_INFO, "Workflow initialized");
+}
+
+// Set working directory
+void micWorkflowSetWorkDir(micWorkflow *wf, const char *dirPath)
+{
+    if (wf == NULL || dirPath == NULL) return;
+    
+    strncpy(wf->workDir, dirPath, MAX_FILEPATH_LENGTH - 1);
+    wf->workDir[MAX_FILEPATH_LENGTH - 1] = '\0';
+    
+    micTraceLog(MIC_LOG_INFO, "Workflow work directory: %s", wf->workDir);
+}
+
+// Load configuration
+int micWorkflowLoadConfig(micWorkflow *wf, const char *configFile)
+{
+    if (wf == NULL || configFile == NULL) return -1;
+    
+    // Detect file type by extension
+    if (micIsFileExtension(configFile, ".json"))
+    {
+        return micLoadConfigJSON(&wf->config, configFile);
+    }
+    else
+    {
+        return micLoadConfig(&wf->config, configFile);
+    }
+}
+
+// Load samples
+int micWorkflowLoadSamples(micWorkflow *wf, const char *samplesFile)
+{
+    if (wf == NULL || samplesFile == NULL) return -1;
+    
+    // Detect file type by extension
+    if (micIsFileExtension(samplesFile, ".json"))
+    {
+        return micLoadSamplesJSON(&wf->samples, samplesFile);
+    }
+    else
+    {
+        return micLoadSamplesList(&wf->samples, samplesFile);
+    }
+}
+
+// Expand pattern
+char **micWorkflowExpand(micWorkflow *wf, const char *pattern, int *count)
+{
+    if (wf == NULL || pattern == NULL || count == NULL) return NULL;
+    
+    // Free previous expansion if any
+    if (wf->expandedFiles != NULL)
+    {
+        micFreeExpandedFiles(wf->expandedFiles, wf->expandedCount);
+        wf->expandedFiles = NULL;
+        wf->expandedCount = 0;
+    }
+    
+    // Expand with samples
+    wf->expandedFiles = micExpand(pattern, &wf->samples, &wf->expandedCount);
+    *count = wf->expandedCount;
+    
+    return wf->expandedFiles;
+}
+
+// Get config value
+const char *micWorkflowConfig(micWorkflow *wf, const char *key)
+{
+    if (wf == NULL || key == NULL) return NULL;
+    
+    return micConfigGet(&wf->config, key);
+}
+
+// Free workflow resources
+void micWorkflowFree(micWorkflow *wf)
+{
+    if (wf == NULL) return;
+    
+    micConfigFree(&wf->config);
+    micFreeSampleList(&wf->samples);
+    
+    if (wf->expandedFiles != NULL)
+    {
+        micFreeExpandedFiles(wf->expandedFiles, wf->expandedCount);
+        wf->expandedFiles = NULL;
+        wf->expandedCount = 0;
+    }
+    
+    micTraceLog(MIC_LOG_INFO, "Workflow resources freed");
+}
+
+// Helper Path Functions
+
+// Build container path
+char *micContainerPath(const char *containerDir, const char *containerName)
+{
+    if (containerDir == NULL || containerName == NULL) return NULL;
+    
+    int len = strlen(containerDir) + strlen(containerName) + 2;  // +2 for '/' and '\0'
+    char *path = (char *)MIC_MALLOC(len);
+    
+    if (path != NULL)
+    {
+        snprintf(path, len, "%s/%s", containerDir, containerName);
+    }
+    
+    return path;
+}
+
+// Build output path
+char *micBuildPath(const char *workDir, const char *relativePath)
+{
+    if (workDir == NULL || relativePath == NULL) return NULL;
+    
+    int len = strlen(workDir) + strlen(relativePath) + 2;
+    char *path = (char *)MIC_MALLOC(len);
+    
+    if (path != NULL)
+    {
+        snprintf(path, len, "%s/%s", workDir, relativePath);
+    }
+    
+    return path;
+}
+
+// Ensure output directory exists
+bool micEnsureOutputDir(const char *filePath)
+{
+    if (filePath == NULL) return false;
+    
+    // Extract directory from file path
+    const char *dirPath = micGetDirectoryPath(filePath);
+    
+    if (dirPath != NULL && strlen(dirPath) > 0)
+    {
+        // Check if directory exists, create if not
+        if (!micIsDirectoryAvailable(dirPath))
+        {
+            if (micMakeDirectory(dirPath) == 0)
+            {
+                micTraceLog(MIC_LOG_INFO, "Created output directory: %s", dirPath);
+                return true;
+            }
+            else
+            {
+                micTraceLog(MIC_LOG_WARNING, "Failed to create output directory: %s", dirPath);
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    return false;
+}
 
 #endif   // MIC_IMPLEMENTATION

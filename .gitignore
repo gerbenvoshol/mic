@@ -56,6 +56,7 @@ example
 advanced_example
 real_world_example
 hpc_example
+bioinformatics_example
 storage.data
 test_mic_*
 pipeline_*
@@ -70,3 +71,9 @@ async_output.txt
 hpc_input.txt
 hpc_processed.txt
 hpc_result.txt
+test_*.csv
+test_*.txt
+test_*.json
+samples.txt
+samples.json
+gene_expression.csv

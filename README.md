@@ -17,7 +17,7 @@ This library provides a set of platform-independent functions intended to be use
  - Portable: Single-file header-only
  - Multi-platform (Linux, Windows, macOS)
  - Optional dependencies: zlib (compression), pthread (threading)
- - 116+ utility functions for pipeline automation
+ - 180+ utility functions for pipeline automation
 
 ## Functionality Provided
 
@@ -34,11 +34,20 @@ This library provides a set of platform-independent functions intended to be use
    - File polling with timeout
    - Dependency checking
    - Pipeline state management
- - **HPC features** ✨ NEW:
+ - **HPC features**:
    - SLURM job submission and management
    - Container support (Singularity, Docker)
    - Asynchronous task execution
    - Multithreading with synchronization
+ - **Bioinformatics workflow features** ✨ NEW:
+   - Configuration file management (simple key=value and JSON)
+   - Sample list management for batch processing
+   - File pattern expansion with wildcards (Snakemake-like)
+   - CSV file operations (read, write, query, aggregate)
+   - Gzip/compressed file handling
+   - AWK-like text processing functions
+   - Workflow context management
+   - Helper path functions
 
 ## Quick Start
 
@@ -149,6 +158,9 @@ gcc -o advanced_example advanced_example.c -lz
 
 gcc -o hpc_example hpc_example.c -lz -lpthread
 ./hpc_example
+
+gcc -o bioinformatics_example bioinformatics_example.c -lm -lz
+./bioinformatics_example
 ```
 
 ## Requirements
@@ -214,6 +226,16 @@ gcc -o myapp myapp.c -DMIC_NO_ZLIB -DMIC_NO_THREADS  # Minimal build
 - `micMutexLock()` / `micMutexUnlock()` - Synchronization
 - `micGetNumCores()` - CPU core count
 
+### Bioinformatics Workflows (60+ functions) ✨ NEW
+- **Configuration**: Load/save config from key=value or JSON files
+- **Sample Lists**: Manage sample batches for processing
+- **Pattern Expansion**: Snakemake-like wildcard expansion
+- **CSV Operations**: Complete CSV read/write/query/aggregate
+- **Gzip Files**: Compressed file operations
+- **Text Processing**: AWK-like field operations, filtering, sorting
+- **Workflow Context**: High-level workflow management
+- See [BIOINFORMATICS.md](BIOINFORMATICS.md) for detailed documentation
+
 ### File Polling
 - `micWaitForFile()` - Poll for single file
 - `micWaitForFiles()` - Poll for multiple files
@@ -241,9 +263,9 @@ gcc -o myapp myapp.c -DMIC_NO_ZLIB -DMIC_NO_THREADS  # Minimal build
 ### Others
 - Logging, environment info, timing, random numbers, storage
 
-**Total Functions: 116** (60 core + 2 compression + 8 pipeline + 23 HPC + 23 others)
+**Total Functions: 180+** (60 core + 2 compression + 8 pipeline + 23 HPC + 60+ bioinformatics + 27 others)
 
-See [HPC_FEATURES.md](HPC_FEATURES.md) and [IMPLEMENTATION.md](IMPLEMENTATION.md) for complete API reference.
+See [BIOINFORMATICS.md](BIOINFORMATICS.md), [HPC_FEATURES.md](HPC_FEATURES.md) and [IMPLEMENTATION.md](IMPLEMENTATION.md) for complete API reference.
   
 ## License
 
