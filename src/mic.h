@@ -332,6 +332,7 @@ MICAPI int micGetNumCores(void);                                        // Get n
 
 #if defined(_WIN32)
     #include <direct.h>             // Required for: _getch(), _chdir()
+    #include <windows.h>            // Required for: FindFirstFile(), FindNextFile(), WIN32_FIND_DATA
     #define GETCWD _getcwd          // NOTE: MSDN recommends not to use getcwd(), chdir()
     #define CHDIR _chdir
     #include <io.h>                 // Required for: _access() [Used in FileExists()]
@@ -1323,23 +1324,213 @@ long micGetFileInfo(const char *fileName, int info)
     return 0;
 }
 
+// Helper function for recursive directory size calculation
+static long long micGetDirectorySizeRecursive(const char *dirPath)
+{
+    long long totalSize = 0;
+    
+    #if defined(_WIN32)
+        // Windows implementation
+        WIN32_FIND_DATAA findData;
+        char searchPath[MAX_FILEPATH_LENGTH];
+        
+        snprintf(searchPath, MAX_FILEPATH_LENGTH, "%s\\*", dirPath);
+        
+        HANDLE hFind = FindFirstFileA(searchPath, &findData);
+        if (hFind == INVALID_HANDLE_VALUE)
+        {
+            return 0;
+        }
+        
+        do
+        {
+            // Skip . and ..
+            if (strcmp(findData.cFileName, ".") == 0 || strcmp(findData.cFileName, "..") == 0)
+            {
+                continue;
+            }
+            
+            char fullPath[MAX_FILEPATH_LENGTH];
+            snprintf(fullPath, MAX_FILEPATH_LENGTH, "%s\\%s", dirPath, findData.cFileName);
+            
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                // Recursively get size of subdirectory
+                totalSize += micGetDirectorySizeRecursive(fullPath);
+            }
+            else
+            {
+                // Add file size
+                LARGE_INTEGER fileSize;
+                fileSize.LowPart = findData.nFileSizeLow;
+                fileSize.HighPart = findData.nFileSizeHigh;
+                totalSize += fileSize.QuadPart;
+            }
+        }
+        while (FindNextFileA(hFind, &findData) != 0);
+        
+        FindClose(hFind);
+    #else
+        // Unix/Linux implementation
+        DIR *dir = opendir(dirPath);
+        if (dir == NULL)
+        {
+            return 0;
+        }
+        
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL)
+        {
+            // Skip . and ..
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            {
+                continue;
+            }
+            
+            char fullPath[MAX_FILEPATH_LENGTH];
+            snprintf(fullPath, MAX_FILEPATH_LENGTH, "%s/%s", dirPath, entry->d_name);
+            
+            struct stat statbuf;
+            if (stat(fullPath, &statbuf) == 0)
+            {
+                if (S_ISDIR(statbuf.st_mode))
+                {
+                    // Recursively get size of subdirectory
+                    totalSize += micGetDirectorySizeRecursive(fullPath);
+                }
+                else
+                {
+                    // Add file size
+                    totalSize += statbuf.st_size;
+                }
+            }
+        }
+        
+        closedir(dir);
+    #endif
+    
+    return totalSize;
+}
+
 // Get directory byte size (for all files contained)
 int micGetDirectorySize(const char *dirPath)
 {
-    // This requires recursive directory traversal
-    // For now, return a simple implementation
-    micTraceLog(MIC_LOG_WARNING, "micGetDirectorySize() not fully implemented - requires recursive directory traversal");
-    return -1;
+    if (dirPath == NULL || !micIsDirectoryAvailable(dirPath))
+    {
+        micTraceLog(MIC_LOG_ERROR, "micGetDirectorySize() - Invalid directory path");
+        return -1;
+    }
+    
+    long long size = micGetDirectorySizeRecursive(dirPath);
+    
+    // Check if size exceeds INT_MAX
+    if (size > INT_MAX)
+    {
+        micTraceLog(MIC_LOG_WARNING, "micGetDirectorySize() - Directory size exceeds INT_MAX, returning INT_MAX");
+        return INT_MAX;
+    }
+    
+    return (int)size;
 }
 
 // Get filenames in a directory path (memory should be freed)
 char **micGetDirectoryFiles(const char *dirPath, int *count)
 {
     #if defined(_WIN32)
-        // Windows implementation would use FindFirstFile/FindNextFile
-        micTraceLog(MIC_LOG_WARNING, "micGetDirectoryFiles() not implemented for Windows");
+        // Windows implementation using FindFirstFile/FindNextFile
+        WIN32_FIND_DATAA findData;
+        char searchPath[MAX_FILEPATH_LENGTH];
+        
         *count = 0;
-        return NULL;
+        
+        if (dirPath == NULL)
+        {
+            return NULL;
+        }
+        
+        // Create search pattern
+        snprintf(searchPath, MAX_FILEPATH_LENGTH, "%s\\*", dirPath);
+        
+        // First pass: count files
+        int fileCount = 0;
+        HANDLE hFind = FindFirstFileA(searchPath, &findData);
+        if (hFind == INVALID_HANDLE_VALUE)
+        {
+            return NULL;
+        }
+        
+        do
+        {
+            // Skip . and ..
+            if (strcmp(findData.cFileName, ".") != 0 && strcmp(findData.cFileName, "..") != 0)
+            {
+                fileCount++;
+            }
+        }
+        while (FindNextFileA(hFind, &findData) != 0);
+        
+        FindClose(hFind);
+        
+        if (fileCount == 0)
+        {
+            *count = 0;
+            return NULL;
+        }
+        
+        // Sanity check to prevent overflow
+        if (fileCount > 10000) fileCount = 10000;
+        
+        // Allocate array for file names
+        char **files = (char **)MIC_MALLOC(fileCount * sizeof(char *));
+        if (files == NULL)
+        {
+            *count = 0;
+            return NULL;
+        }
+        
+        // Initialize array to NULL
+        for (int i = 0; i < fileCount; i++)
+        {
+            files[i] = NULL;
+        }
+        
+        // Second pass: store file names
+        hFind = FindFirstFileA(searchPath, &findData);
+        if (hFind == INVALID_HANDLE_VALUE)
+        {
+            MIC_FREE(files);
+            *count = 0;
+            return NULL;
+        }
+        
+        int index = 0;
+        do
+        {
+            if (strcmp(findData.cFileName, ".") != 0 && strcmp(findData.cFileName, "..") != 0)
+            {
+                if (index < fileCount)
+                {
+                    files[index] = (char *)MIC_MALLOC(strlen(findData.cFileName) + 1);
+                    if (files[index] != NULL)
+                    {
+                        strcpy(files[index], findData.cFileName);
+                        index++;
+                    }
+                    else
+                    {
+                        // Allocation failed, cleanup and return what we have so far
+                        FindClose(hFind);
+                        *count = index;
+                        return files;
+                    }
+                }
+            }
+        }
+        while (FindNextFileA(hFind, &findData) != 0);
+        
+        FindClose(hFind);
+        *count = index;
+        return files;
     #else
         // Unix/Linux implementation
         DIR *dir = opendir(dirPath);
