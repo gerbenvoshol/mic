@@ -87,6 +87,8 @@
 #define MIC_STRING_STATIC_MAX_SIZE      2048
 #define MAX_TRACELOG_MSG_LENGTH         512
 #define MAX_FILEPATH_LENGTH             1024
+#define MAX_DIRECTORY_FILES             10000    // Maximum files to list in a directory (prevents overflow)
+#define MAX_ZIP_ENTRIES                 1000     // Maximum files in a ZIP archive (memory limit)
 
 
 //----------------------------------------------------------------------------------
@@ -1478,7 +1480,7 @@ char **micGetDirectoryFiles(const char *dirPath, int *count)
         }
         
         // Sanity check to prevent overflow
-        if (fileCount > 10000) fileCount = 10000;
+        if (fileCount > MAX_DIRECTORY_FILES) fileCount = MAX_DIRECTORY_FILES;
         
         // Allocate array for file names
         char **files = (char **)MIC_MALLOC(fileCount * sizeof(char *));
@@ -1513,7 +1515,8 @@ char **micGetDirectoryFiles(const char *dirPath, int *count)
                     files[index] = (char *)MIC_MALLOC(strlen(findData.cFileName) + 1);
                     if (files[index] != NULL)
                     {
-                        strcpy(files[index], findData.cFileName);
+                        strncpy(files[index], findData.cFileName, strlen(findData.cFileName) + 1);
+                        files[index][strlen(findData.cFileName)] = '\0';
                         index++;
                     }
                     else
@@ -1554,7 +1557,7 @@ char **micGetDirectoryFiles(const char *dirPath, int *count)
         }
         
         // Allocate array for file names
-        if (fileCount > 10000) fileCount = 10000;  // Sanity check to prevent overflow
+        if (fileCount > MAX_DIRECTORY_FILES) fileCount = MAX_DIRECTORY_FILES;  // Sanity check to prevent overflow
         
         char **files = (char **)MIC_MALLOC(fileCount * sizeof(char *));
         if (files == NULL)
@@ -2522,9 +2525,9 @@ static int micZipAddFileToArchive(FILE *zipFile, const char *filePath, const cha
         
         int archivePathLen = (int)strlen(archivePath);
         
-        // Store entry info
-        strncpy(entry->fileName, archivePath, 255);
-        entry->fileName[255] = '\0';
+        // Store entry info (ensure null termination)
+        strncpy(entry->fileName, archivePath, sizeof(entry->fileName) - 1);
+        entry->fileName[sizeof(entry->fileName) - 1] = '\0';
         entry->crc32 = crc32;
         entry->compressedSize = compressedSize;
         entry->uncompressedSize = fileSize;
@@ -2648,8 +2651,8 @@ int micZipDirectory(const char *srcPath, const char *dstFileName)
             return -1;
         }
         
-        // Allocate entry array (max 1000 files)
-        const int maxEntries = 1000;
+        // Allocate entry array for tracking files
+        const int maxEntries = MAX_ZIP_ENTRIES;
         micZipFileEntry *entries = (micZipFileEntry *)MIC_MALLOC(maxEntries * sizeof(micZipFileEntry));
         if (entries == NULL)
         {
