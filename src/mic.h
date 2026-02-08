@@ -51,6 +51,7 @@
 
 #include <stdarg.h>     // Required for: va_list
 #include <stdbool.h>    // Required for: bool type
+#include <time.h>       // Required for: clock_t, clock()
 
 #ifndef MICAPI
     #define MICAPI   // We are building or using the library as a static library (or Linux shared library)
@@ -222,6 +223,8 @@ typedef struct {
     double cpuTime;         // CPU time
     double maxRSS;          // Maximum resident set size (KB)
     long timestamp;         // Unix timestamp when benchmark was recorded
+    double startTime;       // Internal: start wall time
+    clock_t startClock;     // Internal: start CPU time
 } micBenchmark;
 
 // Multi-wildcard expansion
@@ -6025,8 +6028,25 @@ void micBenchmarkStart(micBenchmark *bm, const char *ruleName, const char *sampl
     
     bm->timestamp = micGetTimeStamp();
     
-    // Record start time
-    micInitTimer();
+    // Record start time (platform-specific)
+#if defined(_WIN32)
+    bm->startTime = (double)GetTickCount() / 1000.0;
+#elif defined(__linux__)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    bm->startTime = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+#elif defined(__APPLE__)
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    bm->startTime = (double)mts.tv_sec + (double)mts.tv_nsec / 1000000000.0;
+#else
+    bm->startTime = 0.0;
+#endif
+    
+    bm->startClock = clock();
 }
 
 // End benchmark
@@ -6034,9 +6054,29 @@ void micBenchmarkEnd(micBenchmark *bm)
 {
     if (bm == NULL) return;
     
-    // Record end time
-    bm->wallTime = micGetTime();
-    bm->cpuTime = (double)clock() / CLOCKS_PER_SEC;
+    // Record end time (platform-specific)
+#if defined(_WIN32)
+    double endTime = (double)GetTickCount() / 1000.0;
+    bm->wallTime = endTime - bm->startTime;
+#elif defined(__linux__)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double endTime = (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+    bm->wallTime = endTime - bm->startTime;
+#elif defined(__APPLE__)
+    clock_serv_t cclock;
+    mach_timespec_t mts;
+    host_get_clock_service(mach_host_self(), CALENDAR_CLOCK, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    double endTime = (double)mts.tv_sec + (double)mts.tv_nsec / 1000000000.0;
+    bm->wallTime = endTime - bm->startTime;
+#else
+    bm->wallTime = 0.0;
+#endif
+    
+    clock_t endClock = clock();
+    bm->cpuTime = (double)(endClock - bm->startClock) / CLOCKS_PER_SEC;
     
     // Get memory usage (platform-specific)
 #if defined(__linux__)

@@ -469,3 +469,286 @@ micFreeCSV(csv);
 - [HPC Features](HPC_FEATURES.md) - SLURM and container support
 - [Advanced Features](ADVANCED_FEATURES.md) - Pipeline features
 - `bioinformatics_example.c` - Complete working example
+- `rule_example.c` - Rule system example
+
+---
+
+## Rule System and Workflow Management (Snakemake-like)
+
+The mic library includes a comprehensive rule-based workflow system similar to Snakemake, allowing you to define modular, reusable pipeline steps with automatic dependency resolution.
+
+### 1. Rule Definition
+
+Create rules to define workflow steps:
+
+```c
+// Create a rule
+micRule *trimRule = micRuleCreate("trim_reads");
+
+// Set inputs and outputs with wildcards
+micRuleSetInput(trimRule, "raw/{sample}_R1.fastq.gz");
+micRuleSetInput(trimRule, "raw/{sample}_R2.fastq.gz");
+micRuleSetOutput(trimRule, "trimmed/{sample}_R1_trimmed.fastq.gz");
+micRuleSetOutput(trimRule, "trimmed/{sample}_R2_trimmed.fastq.gz");
+
+// Set shell command
+micRuleSetShell(trimRule, "fastp -i {input[0]} -I {input[1]} -o {output[0]} -O {output[1]}");
+
+// Set additional properties
+micRuleSetThreads(trimRule, 4);
+micRuleSetBenchmark(trimRule, "benchmarks/{sample}.trim.txt");
+micRuleSetMessage(trimRule, "Trimming reads for {sample}");
+micRuleSetLog(trimRule, "logs/{sample}.trim.log");
+
+// Execute rule (with wildcards)
+const char *wildcards[] = {"sample1"};
+micRuleExecute(trimRule, wildcards, 1);
+
+// Free rule
+micRuleFree(trimRule);
+```
+
+### 2. Workflow DAG (Directed Acyclic Graph)
+
+Build workflows with multiple rules and automatic dependency resolution:
+
+```c
+// Create workflow DAG
+micWorkflowDAG *dag = micWorkflowDAGCreate();
+micWorkflowDAGSetWorkDir(dag, "/data/analysis");
+
+// Add rules to DAG
+micWorkflowDAGAddRule(dag, trimRule);
+micWorkflowDAGAddRule(dag, alignRule);
+micWorkflowDAGAddRule(dag, callVariantsRule);
+
+// Execute workflow targeting final output
+micWorkflowDAGExecute(dag, "variants/sample1.vcf");
+
+// Free DAG (also frees all rules)
+micWorkflowDAGFree(dag);
+```
+
+### 3. Benchmark Tracking
+
+Track execution time and resource usage for each rule:
+
+```c
+micBenchmark bm;
+
+// Start tracking
+micBenchmarkStart(&bm, "align_reads", "sample1");
+
+// ... execute rule ...
+
+// End tracking
+micBenchmarkEnd(&bm);
+
+// Access benchmark data
+printf("Wall time: %.2f seconds\n", bm.wallTime);
+printf("CPU time: %.2f seconds\n", bm.cpuTime);
+printf("Max RSS: %.2f KB\n", bm.maxRSS);
+
+// Save benchmark to CSV file
+micBenchmarkSave(&bm, "benchmarks/sample1.align.csv");
+
+// Load all benchmarks from directory
+micCSVFile *benchmarks = micBenchmarkLoadAll("benchmarks");
+// ... analyze benchmarks ...
+micFreeCSV(benchmarks);
+```
+
+### 4. Multi-Wildcard Expansion
+
+Expand patterns with multiple wildcards:
+
+```c
+// Define wildcard sets
+micWildcardSet sampleWildcard;
+sampleWildcard.count = 3;
+strncpy(sampleWildcard.name, "sample", sizeof(sampleWildcard.name) - 1);
+sampleWildcard.values = (char **)MIC_MALLOC(sizeof(char *) * sampleWildcard.count);
+sampleWildcard.values[0] = "sample1";
+sampleWildcard.values[1] = "sample2";
+sampleWildcard.values[2] = "sample3";
+
+// Expand pattern
+int count;
+char **files = micExpandMultiWildcard("output/{sample}.bam", &sampleWildcard, 1, &count);
+
+for (int i = 0; i < count; i++) {
+    printf("%s\n", files[i]);  // output/sample1.bam, output/sample2.bam, etc.
+    MIC_FREE(files[i]);
+}
+MIC_FREE(files);
+
+micFreeWildcardSet(&sampleWildcard);
+```
+
+### 5. Temporary File Management
+
+Mark files as temporary for automatic cleanup:
+
+```c
+// Mark file as temporary
+micMarkTemporary("intermediate/temp_data.txt");
+
+// Check if file is temporary
+if (micIsTemporary("intermediate/temp_data.txt")) {
+    printf("File is temporary\n");
+}
+
+// Get count of temporary files
+int tempCount = micGetTemporaryFileCount();
+
+// Cleanup all temporary files at workflow end
+micCleanupTemporaryFiles();
+```
+
+### 6. Resource Management
+
+Specify and check resource requirements:
+
+```c
+// Get system resources
+micResources sysRes = micGetSystemResources();
+printf("CPU cores: %d\n", sysRes.cpuCores);
+printf("Memory: %d MB\n", sysRes.memoryMB);
+
+// Set resource requirements for a rule
+micResources required = {
+    .memoryMB = 4096,
+    .cpuCores = 4,
+    .gpuCount = 0,
+    .diskMB = 10000
+};
+
+micRuleSetResources(alignRule, &required);
+
+// Check if resources are available
+if (micCheckResourcesAvailable(&required)) {
+    micRuleExecute(alignRule, NULL, 0);
+} else {
+    micTraceLog(MIC_LOG_ERROR, "Insufficient resources");
+}
+```
+
+### 7. Rule Inheritance and Copying
+
+Create rule variants by copying and modifying:
+
+```c
+// Copy rule with new name
+micRule *trimAltRule = micRuleCopy(trimRule, "trim_reads_alternative");
+
+// Override specific properties
+micRuleOverrideShell(trimAltRule, "trimmomatic PE {input[0]} {input[1]} {output[0]} {output[1]}");
+micRuleOverrideInput(trimAltRule, 0, "raw_alt/{sample}_R1.fastq.gz");
+
+// Execute with different parameters
+micRuleExecute(trimAltRule, wildcards, 1);
+
+micRuleFree(trimAltRule);
+```
+
+### 8. Container Support
+
+Execute rules in containers (Singularity/Docker):
+
+```c
+micRule *alignRule = micRuleCreate("align_reads");
+micRuleSetInput(alignRule, "trimmed/{sample}_R1.fastq.gz");
+micRuleSetOutput(alignRule, "aligned/{sample}.bam");
+micRuleSetShell(alignRule, "bwa mem ref.fa {input[0]} | samtools view -b > {output[0]}");
+
+// Set container image
+micRuleSetContainer(alignRule, "/containers/bwa_samtools.sif");
+
+// Rule will execute in container automatically
+micRuleExecute(alignRule, wildcards, 1);
+```
+
+### 9. Dynamic Input Functions
+
+Use function pointers for dynamic input determination:
+
+```c
+// Define input function
+char **getAlignmentInputs(const char *sample, void *userData, int *count) {
+    // Dynamically determine inputs based on sample
+    *count = 2;
+    char **inputs = (char **)MIC_MALLOC(sizeof(char *) * 2);
+    inputs[0] = (char *)MIC_MALLOC(256);
+    inputs[1] = (char *)MIC_MALLOC(256);
+    sprintf(inputs[0], "trimmed/%s_R1.fastq.gz", sample);
+    sprintf(inputs[1], "trimmed/%s_R2.fastq.gz", sample);
+    return inputs;
+}
+
+// Set input function for rule
+micRuleSetInputFunction(alignRule, getAlignmentInputs, NULL);
+```
+
+### Complete Workflow Example
+
+```c
+#define MIC_IMPLEMENTATION
+#include "src/mic.h"
+
+int main(void) {
+    micSetTraceLogLevel(MIC_LOG_INFO);
+    
+    // Create workflow DAG
+    micWorkflowDAG *dag = micWorkflowDAGCreate();
+    micWorkflowDAGSetWorkDir(dag, "/data/analysis");
+    
+    // Define trim rule
+    micRule *trimRule = micRuleCreate("trim_reads");
+    micRuleSetInput(trimRule, "raw/{sample}_R1.fastq.gz");
+    micRuleSetInput(trimRule, "raw/{sample}_R2.fastq.gz");
+    micRuleSetOutput(trimRule, "trimmed/{sample}_R1_trimmed.fastq.gz");
+    micRuleSetOutput(trimRule, "trimmed/{sample}_R2_trimmed.fastq.gz");
+    micRuleSetShell(trimRule, "fastp -i {input[0]} -I {input[1]} -o {output[0]} -O {output[1]}");
+    micRuleSetThreads(trimRule, 4);
+    micRuleSetBenchmark(trimRule, "benchmarks/{sample}.trim.txt");
+    micWorkflowDAGAddRule(dag, trimRule);
+    
+    // Define alignment rule
+    micRule *alignRule = micRuleCreate("align_reads");
+    micRuleSetInput(alignRule, "trimmed/{sample}_R1_trimmed.fastq.gz");
+    micRuleSetInput(alignRule, "trimmed/{sample}_R2_trimmed.fastq.gz");
+    micRuleSetOutput(alignRule, "aligned/{sample}.bam");
+    micRuleSetShell(alignRule, "bowtie2 -x ref -1 {input[0]} -2 {input[1]} | samtools view -bS - > {output[0]}");
+    micRuleSetThreads(alignRule, 8);
+    micRuleSetBenchmark(alignRule, "benchmarks/{sample}.align.txt");
+    micWorkflowDAGAddRule(dag, alignRule);
+    
+    // Execute workflow
+    micWorkflowDAGExecute(dag, "aligned/sample1.bam");
+    
+    // Cleanup
+    micWorkflowDAGFree(dag);
+    
+    return 0;
+}
+```
+
+### Rule System Memory Management
+
+Rules and workflows must be properly freed:
+
+```c
+// Rules added to DAG are freed when DAG is freed
+micWorkflowDAGFree(dag);  // Frees all rules in DAG
+
+// Standalone rules must be freed manually
+micRule *rule = micRuleCreate("test");
+// ... use rule ...
+micRuleFree(rule);
+
+// Wildcard sets must be freed
+micFreeWildcardSet(&wildcardSet);
+
+// Temporary files are automatically deleted on cleanup
+micCleanupTemporaryFiles();
+```
